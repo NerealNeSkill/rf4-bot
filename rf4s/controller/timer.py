@@ -58,7 +58,7 @@ class Timer:
         self.cast_rhour_list = []
         self.cast_ghour_list = []
 
-        self.last_tea_drink = 0
+        self.last_tea_drink = self.start_time  # ИСПРАВЛЕНО: было 0
         self.last_alcohol_drink = 0
         self.last_coffee_drink = 0
         self.last_rare_event_check = 0

@@ -112,5 +112,18 @@ def to_list(profile: dict) -> list:
 
 def load_cfg() -> CN:
     cfg = setup_cfg()
-    cfg.merge_from_file(OUTER_ROOT / "config.yaml")
+    cfg_path = OUTER_ROOT / "config.yaml"
+    # ВАЖНО: cfg.merge_from_file(cfg_path) сам открывает файл внутри yacs
+    # (yacs/config.py: with open(cfg_filename, "r") as f: ...) БЕЗ указания
+    # encoding -- на русской Windows это системная кодировка (cp1251 /
+    # "charmap"), а не UTF-8. config.yaml при этом пишется/читается в UTF-8
+    # (там кириллица в комментариях и, возможно, в значениях) -- отсюда
+    # UnicodeDecodeError на байтах вроде 0x98, которых просто нет в cp1251.
+    # Открываем файл сами, явно в UTF-8, и отдаём уже открытый поток прямо в
+    # CN.load_cfg() -- это тот же путь, что use merge_from_file() внутри
+    # yacs (open -> load_cfg(f) -> merge_from_other_cfg), просто без его
+    # собственного, не учитывающего кодировку, open().
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        other_cfg = CN.load_cfg(f)
+    cfg.merge_from_other_cfg(other_cfg)
     return cfg

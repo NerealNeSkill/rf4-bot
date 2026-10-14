@@ -77,7 +77,7 @@ class PirkTimeoutError(Exception):
 
 class LiftTimeoutError(Exception):
     """Lifting times out."""
-
+    
 
 class BaitNotChosenError(Exception):
     """Bait is not chosen."""
@@ -97,3 +97,7 @@ class DryMixNotFoundError(Exception):
 
 class DriftTimeoutError(Exception):
     """Bait drifting times out during float fishing"""
+    
+    
+class ResetTimeoutError(Exception):
+    pass

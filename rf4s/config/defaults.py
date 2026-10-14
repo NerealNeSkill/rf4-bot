@@ -27,6 +27,7 @@ _C.KEY.ALCOHOL = 6
 # Key for the main rod. This is used for switching back to fishing rod when
 # you're fishing with one rod with baits harvesting feature enabled.
 _C.KEY.MAIN_ROD = 1
+_C.KEY.NEXT_TICKET = "l"
 # Key for the spod rod
 _C.KEY.SPOD_ROD = 7
 # Bot , craft, and harvest quit shortcut (see pynput docs for custom keys).
@@ -82,10 +83,32 @@ _C.BOT.SMTP_VERIFICATION = True
 _C.BOT.SNAG_DETECTION = True
 # Detect spooling while fishing
 _C.BOT.SPOOLING_DETECTION = True
+# Log retrieval-end detection scores and save disputed frames to screenshots/wheel_debug
+_C.BOT.RETRIEVAL_DEBUG = False
+# Detect the end of line retrieval (normal line) by the colour of the filled arc of the spool ring
+_C.BOT.PAUSE_ON_FOCUS_LOSS = True
+_C.BOT.WHEEL_BY_FILL = True
+_C.BOT.WHEEL_RING_MAX_GAP = 0.036
+# Auto-placement of bottom rods at start (put each rod on its stand after the cast)
+_C.BOT.ROD_PLACEMENT = CN()
+_C.BOT.ROD_PLACEMENT.ENABLED = True
+# Length of one sidestep (seconds) when the game refuses to place a rod
+_C.BOT.ROD_PLACEMENT.STEP_SECONDS = 0.15
+# How many sidesteps + retries per rod before giving up
+_C.BOT.ROD_PLACEMENT.MAX_TRIES = 3
+# Sidestep key before placing rod N (index = rod number); extra tries alternate with FALLBACK_STEP
+_C.BOT.ROD_PLACEMENT.STEPS = ["s", "d", "d"]
+_C.BOT.ROD_PLACEMENT.FALLBACK_STEP = "s"
+# Sidestep made right after the previous rod is placed and BEFORE casting rod N ("" = none)
+_C.BOT.ROD_PLACEMENT.SHIFT_BEFORE_CAST = ["", "d", "d"]
+# Length of that pre-cast sidestep (seconds); retry steps after a red banner grow by 50% per try
+_C.BOT.ROD_PLACEMENT.SHIFT_BEFORE_CAST_SECONDS = 0.4
 # Fishing line's retrieval sensitivity (lower = more sensitive) (0.0-1.0)
 _C.BOT.SPOOL_CONFIDENCE = 0.98
 # Time to wait before lifting the rod to pull the fish up when normal mode is used
-_C.BOT.SPOOL_RETRIEVAL_DELAY = 6.0
+_C.BOT.SPOOL_RETRIEVAL_DELAY = 4.0
+_C.BOT.SPOOL_RETRIEVAL_DELAY_MIN = 1.0
+_C.BOT.SPOOL_RETRIEVAL_DELAY_MAX = 4.0
 # Time to wait before lifting the rod to pull the fish up when rainbow line mode is used
 _C.BOT.RAINBOW_RETRIEVAL_DELAY = 3.0
 # Random rod cast probability (0.0-1.0).

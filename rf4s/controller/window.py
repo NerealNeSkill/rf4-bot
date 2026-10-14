@@ -3,14 +3,13 @@
 from pathlib import Path
 from time import sleep
 
-# import win32api, win32con
 import pyautogui as pag
 import win32con
 import win32gui
+import win32com.client
 
 from rf4s import utils
 from rf4s.controller.logger import logger
-from rf4s.utils import press
 
 ANIMATION_DELAY = 0.5
 
@@ -47,9 +46,13 @@ class Window:
         """
         hwnd = win32gui.FindWindow(None, self.game_title)  # class name: UnityWndClass
         if hwnd == 0:
-            # logger.critical("Failed to locate the game window: %s", self.game_title)
             logger.critical(
-                "Failed to locate the game window, please open the game and try again"
+                "\nОШИБКА: Окно игры '%s' не найдено! Запустите 'Русская Рыбалка 4' "
+                "(игра должна быть открыта в оконном или безрамочном режиме) и повторите попытку."
+                "\nERROR: Game window '%s' not found! Please start 'Russian Fishing 4' "
+                "(windowed or borderless mode) and try again.",
+                self.game_title,
+                self.game_title,
             )
             utils.safe_exit()
         return hwnd
@@ -61,7 +64,7 @@ class Window:
         :rtype: bool
         """
         style = win32gui.GetWindowLong(self._get_game_hwnd(), win32con.GWL_STYLE)
-        return style & win32con.WS_CAPTION
+        return bool(style & win32con.WS_CAPTION)
 
     def get_box(self) -> tuple[int, int, int, int]:
         """Get the coordinates and dimensions of the game window.
@@ -97,15 +100,37 @@ class Window:
 
     def activate_script_window(self) -> None:
         """Focus the terminal where user run the script."""
-        press("alt")
-        win32gui.SetForegroundWindow(self.terminal_hwnd)
+        try:
+            shell = win32com.client.Dispatch("WScript.Shell")
+            shell.SendKeys('%')
+            win32gui.SetForegroundWindow(self.terminal_hwnd)
+        except Exception:
+            win32gui.ShowWindow(self.terminal_hwnd, win32con.SW_RESTORE)
         sleep(ANIMATION_DELAY)
 
     def activate_game_window(self) -> None:
         """Focus game window."""
-        press("alt")
-        win32gui.SetForegroundWindow(self._get_game_hwnd())
+        hwnd = self._get_game_hwnd()
+        try:
+            shell = win32com.client.Dispatch("WScript.Shell")
+            shell.SendKeys('%')
+            win32gui.SetForegroundWindow(hwnd)
+        except Exception:
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
         sleep(ANIMATION_DELAY)
+
+    def is_game_foreground(self) -> bool:
+        """True, если окно игры активно и не свёрнуто (иначе ввод и скриншоты бесполезны).
+
+        Не завершает бота, если окна нет: в этом случае возвращает False.
+        """
+        try:
+            hwnd = win32gui.FindWindow(None, self.game_title)
+            if not hwnd or win32gui.IsIconic(hwnd):
+                return False
+            return win32gui.GetForegroundWindow() == hwnd
+        except Exception:  # noqa: BLE001 - проверка фокуса не должна ломать бота
+            return True
 
     def is_size_supported(self) -> bool:
         """Check if the game window size is supported.
@@ -134,6 +159,3 @@ if __name__ == "__main__":
     print(w.get_base_coordinates())
     print(w.get_resolution_str())
     print(w.is_size_supported())
-
-# SetForegroundWindow bug reference :
-# https://stackoverflow.com/questions/56857560/win32gui-setforegroundwindowhandle-not-working-in-loop

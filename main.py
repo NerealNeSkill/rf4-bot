@@ -1,502 +1,174 @@
-"""Entry point for Russian Fishing 4 Script.
+r"""Точка входа RF4S.
 
-Parse command line arguments and config and start running the bot.
+Вся логика лежит в rf4s._main_core (в собранном дистрибутиве -- скомпилированный
+модуль .pyd). Этот файл работает в ДВУХ режимах, переключается флагом
+--protect-main в build.py (copy_project_files()):
+
+  - По умолчанию (--protect-main выключен): обычный текстовый .py, едет в
+    сборку как есть и запускается напрямую встроенным Python
+    (python.exe -u main.py ...). Никакой дополнительной настройки путей не
+    нужно -- её делает сам python.exe через свой ._pth + site.py.
+
+  - С --protect-main: этот же файл компилируется (PyInstaller, см.
+    build_main_exe() в build\build.py) в main.exe. Тогда обе проверки
+    лицензии (в rf4s._main_core и в BotApp.__init__) берут require_license
+    через один и тот же импорт rf4s.licensing -- если main.py остаётся
+    текстовым файлом, достаточно открыть его в блокноте и подменить
+    rf4s.licensing в sys.modules до импорта rf4s._main_core, чтобы обойти обе
+    проверки сразу, без какого-либо реверс-инжиниринга скомпилированных .pyd.
+    Когда это сам .exe, такой подмены через текстовый редактор уже не
+    сделать -- но тогда нужна вся возня ниже с sys.path/DLL (её не видно,
+    пока --protect-main выключен: весь блок срабатывает только при
+    sys.frozen, т.е. внутри скомпилированного .exe).
+
+Здесь, кроме самой настройки путей: (1) быстрый --machine-id без полного
+запуска; (2) --self-test для build.py (main_exe_self_test() при
+--protect-main, smoke_test.py -- без него); (3) сам вызов.
 """
 
-import argparse
-import shlex
+import os
 import sys
-from pathlib import Path
-from packaging.version import Version
-import re
 
-import rich_argparse
-from rich import box, print
-from rich.prompt import Prompt
-from rich.table import Table
-from yacs.config import CfgNode as CN
-
-from rf4s import config, utils
-from rf4s.app import (
-    BotApp,
-    CalculateApp,
-    CraftApp,
-    FrictionBrakeApp,
-    HarvestApp,
-    MoveApp,
-)
-
-VERSION = "0.11.0"
-MINIMUM_COMPATIBLE_CONFIG_VERSION = "0.8.0"
-LOGO = """
-██████╗ ███████╗██╗  ██╗███████╗
-██╔══██╗██╔════╝██║  ██║██╔════╝
-██████╔╝█████╗  ███████║███████╗
-██╔══██╗██╔══╝  ╚════██║╚════██║
-██║  ██║██║          ██║███████║
-╚═╝  ╚═╝╚═╝          ╚═╝╚══════╝"""
-
-# https://patorjk.com/software/taag/#p=testall&f=3D-ASCII&t=RF4S%0A, ANSI Shadow
-
-FEATURES = (
-    {"name": "Fishing Bot", "command": "bot"},
-    {"name": "Craft Items", "command": "craft"},
-    {"name": "Move Forward", "command": "move"},
-    {"name": "Harvest Baits", "command": "harvest"},
-    {"name": "Auto Friction Brake", "command": "frictionbrake"},
-    {"name": "Calculate Tackle's Stats", "command": "calculate"},
-)
-
-BOT_BOOLEAN_ARGUMENTS = (
-    ("t", "tag", "keep only tagged fishes"),
-    ("c", "coffee", "drink coffee if stamina is low during fish fight"),
-    ("a", "alcohol", "drink alcohol before keeping the fish"),
-    ("r", "refill", "consume tea and carrot if hunger or comfort is low"),
-    ("H", "harvest", "harvest baits before casting the rod"),
-    ("L", "lure", "change current lure with a random favorite one, mode: spin"),
-    ("m", "mouse", "move mouse randomly before casting the rod"),
-    ("P", "pause", "pause the script before casting the rod occasionally"),
-    ("RC", "random-cast", "do a redundant rod cast randomly"),
-    ("SC", "skip-cast", "skip the first rod cast"),
-    ("l", "lift", "lift the tackle constantly during a fish fight"),
-    ("e", "electro", "enable electric mode for Electro Raptor series reel"),
-    ("FB", "friction-brake", "adjust friction brake automatically"),
-    ("GR", "gear-ratio", "switch the gear ratio or mode after the retrieval timed out"),
-    ("b", "bite", "save a screenshot in screenshots/ when a fish bite"),
-    ("s", "screenshot", "save a screenshot in screenshots/ after you caught a fish"),
-    ("d", "data", "save fishing data in /logs"),
-    ("E", "email", "send email noticication after the script stop"),
-    ("M", "miaotixing", "send miaotixing notification after the script stop"),
-    ("D", "discord", "send Discord notification after the script stop"),
-    ("TG", "telegram", "send Telegram notification after the script stop"),
-    ("S", "shutdown", "shutdown computer after the script stop"),
-    ("SO", "signout", "sign out instead of closing the game"),
-    ("BL", "broken-lure", "replace broken lures with favorite ones"),
-    ("SR", "spod-rod", "recast spod rod"),
-    ("DM", "dry-mix", "enable dry mix refill, mode: bottom"),
-    ("GB", "groundbait", "enable groundbait refill, mode: bottom"),
-    ("PVA", "pva", "enable pva refill, mode: bottom"),
-)
-
-EPILOG = """
-Docs: https://github.com/dereklee0310/RussianFishing4Script/tree/main/docs/en
-"""
-
-# When running as an executable, use sys.executable to find the config.yaml.
-# This file is not included during compilation and could not be resolved automatically
-# by Nuitka.
-INNER_ROOT = Path(__file__).resolve().parents[0]
-if utils.is_compiled():
-    OUTER_ROOT = Path(sys.executable).parent
-else:
-    OUTER_ROOT = INNER_ROOT
-
-
-class Formatter(
-    rich_argparse.RawTextRichHelpFormatter, argparse.RawDescriptionHelpFormatter
-):
-    # argparse.RawTextHelpFormatter, argparse.RawDescriptionHelpFormatter
-    pass
-
-
-(OUTER_ROOT / "screenshots").mkdir(parents=True, exist_ok=True)
-(OUTER_ROOT / "logs").mkdir(parents=True, exist_ok=True)
-logger = utils.setup_logging()
-
-
-def setup_parser(cfg: CN) -> tuple[argparse.ArgumentParser, tuple]:
-    """Configure the argument parser with all supported command-line options.
-
-    :return: Configured ArgumentParser instance with all options and flags.
-    :rtype: ArgumentParser
-    """
-    parent_parser = argparse.ArgumentParser(add_help=False)
-    parent_parser.add_argument("opts", nargs="*", help="overwrite configuration")
-
-    main_parser = argparse.ArgumentParser(epilog=EPILOG, formatter_class=Formatter)
-    main_parser.add_argument(
-        "-V", "--version", action="version", version=f"RF4S {VERSION}"
-    )
-
-    feature_parsers = main_parser.add_subparsers(title="features", dest="feature")
-
-    bot_parser = feature_parsers.add_parser(
-        "bot",
-        help="start fishing bot",
-        parents=[parent_parser],
-        formatter_class=Formatter,
-    )
-    bot_parser.add_argument(
-        "-V", "--version", action="version", version=f"RF4S-bot {VERSION}"
-    )
-
-    for argument in BOT_BOOLEAN_ARGUMENTS:
-        flag1 = f"-{argument[0]}"
-        flag2 = f"--{argument[1]}"
-        help_message = argument[2]
-        bot_parser.add_argument(flag1, flag2, action="store_true", help=help_message)
-
-    profile_strategy = bot_parser.add_mutually_exclusive_group()
-
-    def pid(_pid: str) -> int:
-        return int(_pid)  # ValueError will be handled
-
-    profile_strategy.add_argument(
-        "-p",
-        "--pid",
-        type=pid,
-        choices=range(len(cfg.PROFILE)),
-        help="specify the id of the profile to use",
-        metavar=f"{{0-{len(cfg.PROFILE) - 1}}}",
-    )
-
-    def pname(_pname: str) -> str:
-        if _pname not in cfg.PROFILE:
-            raise ValueError  # ValueError will be handled
-        return _pname
-
-    profile_strategy.add_argument(
-        "-N",
-        "--pname",
-        type=pname,
-        help="specify the name of the profile to use",
-        metavar="{profile name}",
-    )
-
-    def num_fish(_num_fish: str) -> int:
-        return int(_num_fish)  # ValueError will be handled
-
-    bot_parser.add_argument(
-        "-n",
-        "--fishes-in-keepnet",
-        default=0,  # Flag is not used
-        # const=0, # Flag is used but no argument given
-        type=num_fish,
-        choices=range(cfg.BOT.KEEPNET.CAPACITY),
-        help="specify the number of fishes in your keepnet, (default: %(default)s)",
-        metavar=f"{{0-{cfg.BOT.KEEPNET.CAPACITY - 1}}}",
-    )
-    bot_parser.add_argument(
-        "-T",
-        "--trolling",
-        nargs="?",
-        const="forward",
-        default=None,
-        type=str,
-        choices=["forward", "left", "right"],
-        help=(
-            "enable trolling mode and specify the direction\n"
-            "(default: %(default)s, no argument: %(const)s)"
-        ),
-    )
-    bot_parser.add_argument(
-        "-R",
-        "--rainbow",
-        nargs="?",
-        const=5,
-        default=None,
-        type=int,
-        choices=[0, 5],
-        help=(
-            "enable rainbow line mode and specify the meter to lift the rod\n"
-            "(default: %(default)s, no argument: %(const)s)"
-        ),
-    )
-
-    bot_parser.add_argument(
-        "-BT",
-        "--boat-ticket",
-        nargs="?",
-        const=5,
-        default=0,
-        type=int,
-        choices=[0, 1, 2, 3, 5],
-        help=(
-            "enable boat ticket renewal and specify the duration\n"
-            "(default: %(default)s, no argument: %(const)s)"
-        ),
-    )
-
-    craft_parser = feature_parsers.add_parser(
-        "craft", help="craft items", parents=[parent_parser], formatter_class=Formatter
-    )
-    craft_parser.add_argument(
-        "-V", "--version", action="version", version=f"RF4S-craft {VERSION}"
-    )
-    craft_parser.add_argument(
-        "-d",
-        "--discard",
-        action="store_true",
-        help="discard all the crafted items (for groundbaits)",
-    )
-    craft_parser.add_argument(
-        "-i",
-        "--ignore",
-        action="store_true",
-        help="ignore unselected material slots",
-    )
-    craft_parser.add_argument(
-        "-n",
-        "--craft-limit",
-        type=int,
-        default=-1,
-        help="specify the number of items to craft, (default: %(default)s)",
-        metavar="{number of items}",
-    )
-
-    move_parser = feature_parsers.add_parser(
-        "move",
-        help="toggle moving forward",
-        parents=[parent_parser],
-        formatter_class=Formatter,
-    )
-    move_parser.add_argument(
-        "-V", "--version", action="version", version=f"RF4S-move {VERSION}"
-    )
-    move_parser.add_argument(
-        "-s",
-        "--shift",
-        action="store_true",
-        help="Hold down the Shift key while moving",
-    )
-
-    harvest_parser = feature_parsers.add_parser(
-        "harvest",
-        help="harvest baits",
-        parents=[parent_parser],
-        formatter_class=Formatter,
-    )
-    harvest_parser.add_argument(
-        "-V", "--version", action="version", version=f"RF4S-harvest {VERSION}"
-    )
-    harvest_parser.add_argument(
-        "-r",
-        "--refill",
-        action="store_true",
-        help="refill hunger and comfort by consuming tea and carrot",
-    )
-
-    friction_brake_parser = feature_parsers.add_parser(
-        "frictionbrake",
-        help="automate friction brake",
-        aliases=["fb"],
-        parents=[parent_parser],
-        formatter_class=Formatter,
-    )
-    friction_brake_parser.add_argument(
-        "-V", "--version", action="version", version=f"RF4S-frictionbrake {VERSION}"
-    )
-
-    calculate_paser = feature_parsers.add_parser(
-        "calculate",
-        help="calculate tackle's stats",
-        aliases=["cal"],
-        parents=[parent_parser],
-        formatter_class=Formatter,
-    )
-    calculate_paser.add_argument(
-        "-V", "--version", action="version", version=f"RF4S-calculate {VERSION}"
-    )
-
-    return main_parser, (
-        bot_parser,
-        craft_parser,
-        move_parser,
-        harvest_parser,
-        friction_brake_parser,
-        calculate_paser,
-    )
-
-
-def display_features() -> None:
-    """Display a table of available features for user selection.
-
-    Shows a formatted table with feature IDs and names.
-    """
-    table = Table(
-        "Features",
-        title="List of Available Features",
-        show_header=False,
-        box=box.HEAVY,
-        min_width=36,
-    )
-
-    for i, feature in enumerate(FEATURES):
-        table.add_row(f"{i:>2}. {feature['name']}")
-    print(table)
-
-
-def get_fid(parser: argparse.ArgumentParser) -> int:
-    """Prompt the user to enter a feature ID and validate the input."""
-    while True:
-        user_input = Prompt.ask(
-            "Enter the Feature ID you want to use (q to quit, h for help)",
-            show_default=False,
-        )
-
-        utils.check_quit(user_input)
-
-        if user_input.lower() == "h":
-            parser.print_help()
-            continue
-
-        if user_input.isdigit() and 0 <= int(user_input) < len(FEATURES):
-            return int(user_input)
-        utils.print_error(
-            f"Invalid input. Please enter a number between 0 and {len(FEATURES) - 1}."
-        )
-
-
-def get_launch_options(parser: argparse.ArgumentParser) -> str:
-    """Prompt the user for optional launch arguments."""
-    while True:
-        user_input = Prompt.ask(
-            "Enter launch options (Enter to skip, h for help, q to quit)",
-            default="",
-            show_default=False,
-        )
-
-        utils.check_quit(user_input)
-
-        if user_input.lower() == "h":
-            parser.print_help()
-            continue
-
-        return user_input
-
-
-def get_language() -> str:
-    """Prompt the user to select their game language."""
-    user_input = Prompt.ask(
-        "Select game language: (1) English, (2) Russian (q to quit)",
-        choices=["1", "2", "q"],
-        show_choices=False,
-    )
-    utils.check_quit(user_input)
-    return "en" if user_input == "1" else "ru"
-
-
-def get_click_lock() -> str:
-    """Prompt the user to confirm Windows Mouse ClickLock status."""
-    user_input = Prompt.ask(
-        "Is Windows Mouse ClickLock enabled? (1) Yes, (2) No (q to quit)",
-        choices=["1", "2", "q"],
-        show_choices=False,
-    )
-    utils.check_quit(user_input)
-    return "true" if user_input == "1" else "false"
-
-
-def get_catch_screen_style() -> str:
-    """Prompt the user to select their in-game catch screen style."""
-    utils.print_hint_box(
-        "We recommend 'Simple' to reduce the waiting time for the trophy animation."
-    )
-
-    user_input = Prompt.ask(
-        "Select in-game catch screen style: (1) Animated, (2) Simple (q to quit)",
-        choices=["1", "2", "q"],
-        show_choices=False,
-    )
-    utils.check_quit(user_input)
-    return "animated" if user_input == "1" else "simple"
-
-
-def setup_cfg():
-    config_path = OUTER_ROOT / "config.yaml"
-
-    if not config_path.exists():
-        utils.print_header_box(
-            "Welcome to the RF4S Configuration Wizard. "
-            "It will ask a few questions to generate your configuration file."
-        )
-
-        language = get_language()
-        click_lock = get_click_lock()
-        catch_screen_style = get_catch_screen_style()
-
-        with open(
-            INNER_ROOT / "rf4s/config/config.yaml", "r", encoding="utf-8"
-        ) as file:
-            content = file.read()
-
-        # Use fucking regex because I don't want to use ruamel.yaml
-        content = re.sub(
-            r"^(LANGUAGE:\s*).*$", rf'\1"{language}"', content, flags=re.MULTILINE
-        )
-        content = re.sub(
-            r"^(  CLICK_LOCK:\s*).*$", rf"\1{click_lock}", content, flags=re.MULTILINE
-        )
-        content = re.sub(
-            r"^(  CATCH_SCREEN_STYLE:\s*).*$",
-            rf'\1"{catch_screen_style}"',
-            content,
-            flags=re.MULTILINE,
-        )
-
-        with open(config_path, "w", encoding="utf-8") as file:
-            file.write(content)
-        print("Configuration file generated successfully.")
-
-    cfg = config.load_cfg()
-
-    if Version(cfg.VERSION) < Version(MINIMUM_COMPATIBLE_CONFIG_VERSION):
-        utils.print_error(
-            f"Config version {cfg.VERSION} is incompatible with RF4S {VERSION}.\n"
-            f"Minimum required config version: {MINIMUM_COMPATIBLE_CONFIG_VERSION}\n"
-            "Please update your config.yaml manually, or delete it to run this wizard again."
-        )
-        sys.exit()
-
-    return cfg
-
-
-def main() -> None:
-    utils.print_logo_box(LOGO)
-    cfg = setup_cfg()
-    parser, subparsers = setup_parser(cfg)
-    args = parser.parse_args()  # First parse to get {command} {flags}
-
-    # If user run the program without specifying a command or by double-clicking,
-    # prompt user to input the feature and launch options. This handle both Python
-    # interpreter and Nuitka executable use cases.
-    # If a command is parsed, we assume that the user has already typed the
-    # launch options and don't prompt them to type it.
-    if args.feature is None:
-        display_features()
-        fid = get_fid(parser)
-        # Merge selected feature and launch options
-        sys.argv = [sys.argv[0]] + [FEATURES[fid]["command"]] + sys.argv[1:]
-        sys.argv += shlex.split(get_launch_options(subparsers[fid]))
-        args = parser.parse_args()
-
-    start, end = sys.argv[:2], sys.argv[2:]
-    match args.feature:
-        case "bot":
-            sys.argv = start + shlex.split(cfg.BOT.LAUNCH_OPTIONS) + end
-            App = BotApp
-        case "craft":
-            sys.argv = start + shlex.split(cfg.CRAFT.LAUNCH_OPTIONS) + end
-            App = CraftApp
-        case "move":
-            sys.argv = start + shlex.split(cfg.MOVE.LAUNCH_OPTIONS) + end
-            App = MoveApp
-        case "harvest":
-            sys.argv = start + shlex.split(cfg.HARVEST.LAUNCH_OPTIONS) + end
-            App = HarvestApp
-        case "frictionbrake" | "fb":
-            sys.argv = start + shlex.split(cfg.FRICTION_BRAKE.LAUNCH_OPTIONS) + end
-            App = FrictionBrakeApp
-        case "calculate" | "cal":
-            App = CalculateApp
-        case _:
-            raise NotImplementedError("You should not reach here.")
-    App(cfg, parser.parse_args(), parser).start()
+if getattr(sys, "frozen", False):
+    # Только для main.exe (--protect-main). Обычный python.exe всё это уже
+    # делает сам через свой ._pth + site.py -- здесь воспроизводим то же
+    # самое вручную, раз замороженный .exe в обход этого механизма.
+    import site
+    from pathlib import Path
+
+    # Собранный .exe: сам exe и есть "main.py" в этой схеме путей.
+    BASE_DIR = Path(sys.executable).resolve().parent
+
+    EMBEDDED_SITE = BASE_DIR / "python" / "Lib" / "site-packages"
+    # Установленная сборка самодостаточна: встроенный Python + библиотеки лежат в папке
+    # проекта, и _internal_main (библиотеки main.exe) боту не нужен -- он не должен
+    # затенять или подмешивать чужие версии. Без встроенного Python (на всякий
+    # случай) -- запасной путь через _internal_main.
+    _site_packages_dir = EMBEDDED_SITE if EMBEDDED_SITE.exists() else BASE_DIR / "_internal_main"
+
+    if str(BASE_DIR) not in sys.path:
+        sys.path.insert(0, str(BASE_DIR))
+
+    if _site_packages_dir.exists():
+        # site.addsitedir(), а НЕ просто sys.path.insert(): иначе .pth-файл,
+        # который кладёт pywin32 (добавляет site-packages\win32, \win32\lib,
+        # \Pythonwin -- там лежат win32gui/win32con/win32api и т.п.), никогда не
+        # обрабатывается. При обычном запуске через python.exe это делает сам
+        # site.py (встроенный Python собран с ._pth + "import site" как раз ради
+        # этого), а здесь, в main.exe, путь добавляется вручную руками -- и
+        # должен пройти через ту же обработку, иначе pywin32 "вроде на диске
+        # есть, а ModuleNotFoundError всё равно".
+        _before = list(sys.path)
+        site.addsitedir(str(_site_packages_dir))
+        # addsitedir() дописывает новые пути в конец sys.path; переносим их в
+        # начало (как раньше делал sys.path.insert(0, ...)), чтобы библиотеки из
+        # сборки имели приоритет над чем угодно другим на пути поиска, сохраняя
+        # их взаимный порядок.
+        _new_entries = [p for p in sys.path if p not in _before]
+        for _p in _new_entries:
+            sys.path.remove(_p)
+        sys.path[0:0] = _new_entries
+
+        # pywin32_system32: pip-установка pywin32 (без постинсталла, требующего
+        # прав администратора) оставляет pywintypesXXX.dll/pythoncomXXX.dll в
+        # этой отдельной подпапке site-packages, а не в System32 и не в самом
+        # win32\. .pth-файл её не перечисляет (addsitedir() выше её не находит).
+        # В "замороженном" режиме модуль pywintypes сам ищет pywintypesXXX.dll
+        # простым перебором sys.path (его __import_pywin32_system_module__) --
+        # без этой папки в sys.path падает с "Module 'pywintypes' isn't in
+        # frozen sys.path", даже когда win32/win32\lib уже на месте.
+        _pywin32_system32 = _site_packages_dir / "pywin32_system32"
+        if _pywin32_system32.exists():
+            p = str(_pywin32_system32)
+            if p not in sys.path:
+                sys.path.insert(0, p)
+            if hasattr(os, "add_dll_directory"):
+                try:
+                    os.add_dll_directory(p)
+                except OSError:
+                    pass
+
+        # DLL-зависимости cv2/numpy/и т.п.: при обычном запуске через python.exe
+        # Windows ищет такие DLL рядом с самим .pyd без проблем. Внутри main.exe
+        # (замороженный PyInstaller-процесс) действует урезанный ("safe") порядок
+        # поиска DLL -- он не включает автоматически папку конкретного пакета в
+        # site-packages, только папку самого .exe (её PyInstaller настраивает сам
+        # под СВОИ бандлованные библиотеки в _internal_main) и System32. cv2.pyd
+        # и его собственные бандлованные DLL (ffmpeg-плагин и т.п.) лежат прямо в
+        # site-packages\cv2\, а делвил-пересобранные колёса (numpy, Pillow,
+        # scipy...) кладут рантайм-DLL в соседнюю site-packages\<pkg>.libs\ --
+        # ни то, ни другое само не попадёт в путь поиска внутри main.exe, отсюда
+        # "DLL load failed while importing cv2: не найден указанный модуль" --
+        # хотя тот же cv2 прекрасно грузится при запуске plain python.exe.
+        # Добавляем явно: саму папку cv2\ (если есть) и все *.libs\ в
+        # site-packages (общий паттерн для numpy/scipy/Pillow и т.п.).
+        if hasattr(os, "add_dll_directory"):
+            _dll_candidates = []
+            # Сама папка встроенного Python (BASE_DIR\python\): именно ТАМ лежат
+            # vcruntime140.dll/vcruntime140_1.dll/python3*.dll и т.п. из
+            # embeddable-архива (рядом с python.exe). При запуске через
+            # python.exe эта папка -- "папка главного exe", и Windows всегда ищет
+            # DLL там автоматически, без всяких add_dll_directory. При запуске
+            # через main.exe "папка главного exe" -- это build\stage\ (где лежит
+            # сам main.exe), а build\stage\python\ для него уже ЧУЖАЯ папка,
+            # ничем не особая -- отсюда и "DLL load failed", хотя тот же cv2.pyd
+            # прекрасно грузится через plain python.exe на той же машине с теми
+            # же файлами на диске.
+            _embedded_python_dir = BASE_DIR / "python"
+            if _embedded_python_dir.is_dir():
+                _dll_candidates.append(_embedded_python_dir)
+            _cv2_dir = _site_packages_dir / "cv2"
+            if _cv2_dir.is_dir():
+                _dll_candidates.append(_cv2_dir)
+            _dll_candidates.extend(
+                p for p in _site_packages_dir.glob("*.libs") if p.is_dir()
+            )
+            for _p in _dll_candidates:
+                try:
+                    os.add_dll_directory(str(_p))
+                except OSError:
+                    pass
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        logger.critical(e, exc_info=True)
-        utils.safe_exit()  # TODO
+    # ВАЖНО: должно стоять первой строкой, до любого разбора sys.argv.
+    # При --protect-main main.exe -- это sys.frozen-процесс, а значит
+    # multiprocessing (см. FrictionBrake / Process(...) в rf4s.utils) на
+    # Windows перезапускает САМ ЖЕ main.exe для дочернего процесса-воркера:
+    # multiprocessing/spawn.py::get_command_line() при sys.frozen строит
+    # командную строку как
+    #   main.exe --multiprocessing-fork parent_pid=<pid> pipe_handle=<...>
+    # (при обычном запуске main.py через python.exe sys.frozen=False, и
+    # multiprocessing вместо этого использует "python.exe -c <bootstrap>" --
+    # поэтому раньше, без --protect-main, этой проблемы просто не было видно).
+    # freeze_support() распознаёт "--multiprocessing-fork" в sys.argv[1] и
+    # сам обрабатывает запуск воркера (spawn_main() + sys.exit()), не давая
+    # этим служебным аргументам дойти до argparse в rf4s._main_core.main() --
+    # без неё argparse получает 'parent_pid=17144' как позиционный аргумент
+    # feature и падает с "invalid choice: 'parent_pid=17144'", а сам процесс
+    # фрикциона (frictionbrake) так и не стартует. Для обычных запусков
+    # (--machine-id, --self-test, "bot -p 0 ...") freeze_support() -- no-op:
+    # она ничего не делает, если sys.argv[1] != "--multiprocessing-fork".
+    import multiprocessing
+
+    multiprocessing.freeze_support()
+
+    if "--self-test" in sys.argv:
+        # Только проверка импорта: убедиться, что rf4s._main_core и всё, что он
+        # (транзитивно, через rf4s.app.app и т.д.) импортирует -- реально
+        # загружается. Боевой код (run()) не вызывается.
+        try:
+            import rf4s._main_core  # noqa: F401
+        except BaseException:
+            import traceback
+
+            try:
+                traceback.print_exc()
+            except Exception:
+                pass
+            sys.exit(1)
+        sys.exit(0)
+
+    from rf4s._main_core import run
+
+    run()

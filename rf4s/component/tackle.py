@@ -1,31 +1,141 @@
 """Basic tackle actions like pulling, pirking, etc."""
 
 import random
+from dataclasses import dataclass, replace
 from enum import Enum, auto
+import time
 from time import sleep
 from typing import Literal
 
 import pyautogui as pag
-import win32api
-import win32con
 from PIL import ImageFilter
 from pyscreeze import Box
 
+import win32api
+import win32con
+import ctypes
+
 from rf4s import exceptions, utils
 from rf4s.component.logger import logger
+from rf4s.controller.detection import (
+    BAR_HALF_WIDTH,
+    BAR_RED_FRACTION,
+    ZONE_RED,
+    Detection,
+)
 from rf4s.controller.timer import Timer
-from rf4s.controller.detection import Detection
 from rf4s.utils import add_jitter, press
 
-CAST_SCALE = 0.4  # 25% / 0.4s
+CAST_SCALE = 0.4
 ANIMATION_DELAY = 0.6
 LOOP_DELAY = 0.5
+PULL_LMB_RESET_DELAY = 0.20
 SINK_DELAY = 2
-LIFT_DURATION = 3
 NUM_OF_MOVEMENT = 4
 LANDING_NET_DURATION = 6
 
 OFFSET = 100
+
+
+def _to_bool(value) -> bool:
+    # bool("false") == True, поэтому строки разбираем явно.
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("1", "true", "yes", "on", "да"):
+            return True
+        if text in ("0", "false", "no", "off", "нет"):
+            return False
+        raise ValueError(value)
+    return bool(value)
+
+
+def _opt(cfg, key: str, default, cast):
+    """Значение из конфига; если ключа нет или он пустой, берётся default."""
+    try:
+        value = getattr(cfg, key)
+    except (AttributeError, KeyError):
+        return default
+    if value is None or isinstance(value, (dict, list)):
+        return default
+    try:
+        return cast(value)
+    except (TypeError, ValueError):
+        logger.warning(f"BOT.PULL.{key}: bad value {value!r}, using {default}")
+        return default
+
+
+@dataclass(frozen=True)
+class PullOptions:
+    """Настройки фолбэков pull() (секция BOT.PULL). Все ключи необязательны."""
+
+    tension_fallback: bool = True  # решать по шкале натяжения, а не по таймеру
+    emergency_delay: float = 180.0  # аварийный таймаут при рабочей шкале, с; 0 -- выкл
+    low_tension_fallback: bool = True  # рыба на крючке, натяжение минимальное -> lift
+    low_tension_max: float = 0.30  # доля полудлины шкалы, ниже которой натяжение "минимальное"
+    low_tension_delay: float = 15.0  # сколько секунд подряд, с
+    low_tension_breaks: int = 2  # замеров подряд вне условия, после которых отсчёт заново
+    snag_by_tension: bool = True  # нет рыбы + красная шкала = зацеп
+    snag_log_only: bool = True  # только писать в лог, исключение не поднимать
+    snag_red_from: float = BAR_RED_FRACTION  # с какой доли шкалы заливка считается красной (0.78)
+    snag_delay: float = 3.0  # сколько секунд подряд, с
+    snag_samples: int = 3  # минимум замеров подряд
+    log_state: bool = True  # писать в лог смену состояния шкалы в pull()
+    lift_duration: float = 3.0  # длительность удержания ПКМ при раскачивании, с
+    lift_release_delay: float = 3.0  # пауза между раскачиваниями, с
+    # Смотка закончилась (рыба у кончика удилища): сколько секунд поднимать удилище до
+    # подсака, с. Подсак достаётся сразу, не дожидаясь LIFT-таймаута, чтобы тяжёлая рыба
+    # (карп, амур) не висела на удилище. 0 -- старое поведение (ждать таймаут).
+    net_after_finish_delay: float = 0.6
+
+    @classmethod
+    def from_cfg(cls, cfg) -> "PullOptions":
+        pull_cfg = getattr(cfg.BOT, "PULL", None)
+        d = cls()
+        keys = {
+            "ENABLE_TENSION_FALLBACK": ("tension_fallback", _to_bool),
+            "EMERGENCY_DELAY": ("emergency_delay", float),
+            "LOW_TENSION_FALLBACK": ("low_tension_fallback", _to_bool),
+            "LOW_TENSION_MAX": ("low_tension_max", float),
+            "LOW_TENSION_DELAY": ("low_tension_delay", float),
+            "LOW_TENSION_BREAK_SAMPLES": ("low_tension_breaks", int),
+            "SNAG_BY_TENSION": ("snag_by_tension", _to_bool),
+            "SNAG_LOG_ONLY": ("snag_log_only", _to_bool),
+            "SNAG_RED_FROM": ("snag_red_from", float),
+            "SNAG_CONFIRM_DELAY": ("snag_delay", float),
+            "SNAG_CONFIRM_SAMPLES": ("snag_samples", int),
+            "LOG_STATE": ("log_state", _to_bool),
+            "LIFT_DURATION": ("lift_duration", float),
+            "LIFT_RELEASE_DELAY": ("lift_release_delay", float),
+            "NET_AFTER_FINISH_DELAY": ("net_after_finish_delay", float),
+        }
+        p = replace(d, **{
+            field: _opt(pull_cfg, key, getattr(d, field), cast)
+            for key, (field, cast) in keys.items()
+        })
+
+        fixes = {}
+        if not 0.05 <= p.low_tension_max <= 0.75:
+            fixes["low_tension_max"] = d.low_tension_max
+        if not 0.5 <= p.snag_red_from <= 0.98:
+            fixes["snag_red_from"] = d.snag_red_from
+        for field in ("emergency_delay", "low_tension_delay", "snag_delay", "net_after_finish_delay"):
+            if getattr(p, field) < 0:
+                fixes[field] = getattr(d, field)
+        for field in ("lift_duration", "lift_release_delay"):
+            if getattr(p, field) < 0.5:
+                fixes[field] = getattr(d, field)        
+        for field in ("low_tension_breaks", "snag_samples"):
+            if getattr(p, field) < 1:
+                fixes[field] = getattr(d, field)
+        if fixes:
+            logger.warning(f"BOT.PULL: invalid values replaced: {fixes}")
+            p = replace(p, **fixes)
+        if 0.73 <= p.snag_red_from <= 0.77:
+            logger.warning(
+                f"BOT.PULL.SNAG_RED_FROM={p.snag_red_from}: this point lies on "
+                "a bar divider; the red zone may not be detected"
+            )
+        return p
 
 
 class StageId(Enum):
@@ -39,31 +149,53 @@ class StageId(Enum):
 
 
 class Tackle:
-    """Class for all tackle-dependent methods.
-
-    This class handles actions related to the fishing tackle, such as casting,
-    retrieving, and pulling fish. It also manages tackle resetting and gear ratio switching.
-    """
+    """Class for all tackle-dependent methods."""
 
     def __init__(self, cfg, timer: Timer, detection: Detection):
-        """Initialize the Tackle class with configuration, timer, and detection.
-
-        :param cfg: Configuration node for tackle settings.
-        :type cfg: CfgNode
-        :param timer: Timer instance for timing actions.
-        :type timer: Timer
-        :param detection: Detection instance for in-game state checks.
-        :type detection: Detection
-        """
         self.cfg = cfg
         self.timer = timer
         self.detection = detection
         self.available = True
         self.gear_ratio_changed = False
         self.stage = None
+        self._pull_fallback = False
+        # (приостановить ввод, возобновить ввод): задаёт Player, чтобы зажатые мышь и Shift
+        # отпускались и снова нажимались при потере фокуса игрой (alt+tab)
+        self.focus_hooks = None
+
+    def wait_for_game_focus(self) -> bool:
+        """Если окно игры свернули или потеряло фокус, дождаться возврата и продолжить.
+
+        Зажатые мышь/Shift на время ожидания отпускаются, а после возврата нажимаются
+        заново: игра теряет состояние зажатой кнопки при alt+tab, и без повторного
+        нажатия подмотка не возобновлялась. True, если пауза была.
+        """
+        if not getattr(self.cfg.BOT, "PAUSE_ON_FOCUS_LOSS", True):
+            return False
+        if getattr(self.cfg.PROFILE, "MODE", "") == "telescopic":
+            return False  # телескоп по-прежнему перезабрасывает после возврата в игру
+        window = self.detection.window
+        if window.is_game_foreground():
+            return False
+        logger.warning("Game window is not in the foreground, waiting for it to come back")
+        suspend, resume = self.focus_hooks or (None, None)
+        if suspend:
+            suspend()
+        waited = 0.0
+        while not window.is_game_foreground():
+            sleep(0.5)
+            waited += 0.5
+            if waited >= 600.0:
+                logger.warning("Game window did not return for 10 minutes, continuing anyway")
+                break
+        sleep(1.0)  # дать игре перерисоваться и принять ввод
+        logger.info("Game window is back (%.0f s), resuming", waited)
+        if resume:
+            resume()
+        self.timer.set_timeout_start_time()
+        return True
 
     def check_rare_events(self) -> None:
-        """Check if the game disconnected or the boat ticket expired."""
         if self.detection.is_tackle_broken():
             raise exceptions.TackleBrokenError
         if self.detection.is_disconnected():
@@ -104,66 +236,76 @@ class Tackle:
             sleep(add_jitter(LOOP_DELAY))
 
     def cast(self, lock: bool) -> None:
-        """Cast the rod, then wait for the lure/bait to fly and sink.
-
-        :param lock: Whether to lock the reel after casting.
-        :type lock: bool
-        """
         logger.info("Casting rod")
-        self.stage = StageId.CAST  # Make sure telescopic mode can get different id
-        if self.cfg.ARGS.MOUSE:
+        self.stage = StageId.CAST
+
+        if self.cfg.ARGS.MOUSE and random.random() < 0.36:
             self.move_mouse_randomly()
+
         match self.cfg.PROFILE.CAST_POWER_LEVEL:
-            case 1:  # 0%
-                pag.click()
-            case 5:  # power cast
-                with pag.hold("shift"):
-                    self.hold_mouse_button(1)
+            case 1:
+                utils.click(button="left")
+
+            case 5:
+                utils.key_down("shift")
+                try:
+                    sleep(add_jitter(0.15))
+
+                    utils.mouse_down("left")
+                    if utils.HW_TRACE:
+                        logger.info("Cast: mouse held")
+                    try:
+                        sleep(add_jitter(1.0))
+                    finally:
+                        utils.mouse_up("left")
+                        if utils.HW_TRACE:
+                            logger.info("Cast: mouse release sent")
+
+                    sleep(add_jitter(0.1))
+                finally:
+                    utils.key_up("shift")
+
             case _:
-                # -1 for backward compatibility
                 duration = CAST_SCALE * (self.cfg.PROFILE.CAST_POWER_LEVEL - 1)
                 self.hold_mouse_button(duration)
 
-        sleep(add_jitter(self.cfg.PROFILE.CAST_DELAY, self.cfg.BOT.JITTER_SCALE))
+        sleep(
+            add_jitter(
+                self.cfg.PROFILE.CAST_DELAY,
+                self.cfg.BOT.JITTER_SCALE,
+            )
+        )
+
         if lock:
-            pag.click()
+            utils.click(button="left")
 
     def sink(self) -> None:
-        """Sink the lure until an event happens, designed for marine and wacky rig."""
         logger.info("Sinking lure")
         self.timer.set_timeout_start_time()
         while not self.timer.is_sink_stage_timeout():
             if self.detection.is_moving_in_bottom_layer():
                 logger.info("Lure has reached bottom layer")
-                sleep(
-                    add_jitter(SINK_DELAY)
-                )  # Drop to the bottom to make the depth consistent
+                sleep(add_jitter(SINK_DELAY))
                 self.timer.print_sink_duration()
                 break
 
             if self.detection.is_fish_hooked_twice():
-                pag.click()
+                utils.click(button="left")
                 return
             sleep(add_jitter(LOOP_DELAY))
         self.hold_mouse_button(self.cfg.PROFILE.TIGHTEN_DURATION)
 
     def retrieve(self) -> None:
-        """Retrieve the line until the end is reached and detect unexpected events.
-
-        :raises exceptions.FishCapturedError: A fish is captured.
-        :raises exceptions.LineAtEndError: The line is at its end.
-        :raises exceptions.LineSnaggedError: The line is snagged.
-        """
         logger.info("Retrieving fishing line")
         if self.stage != StageId.RETRIEVE:
             self.stage = StageId.RETRIEVE
             self.timer.set_timeout_start_time()
         while True:
+            self.wait_for_game_focus()
             if self.detection.is_fish_hooked():
                 return
             if self.detection.is_retrieval_finished():
                 return
-
             if self.detection.is_fish_captured():
                 raise exceptions.FishCapturedError
             if self.cfg.BOT.SPOOLING_DETECTION and self.detection.is_line_at_end():
@@ -175,44 +317,183 @@ class Tackle:
             sleep(add_jitter(LOOP_DELAY))
 
     def pull(self) -> None:
-        """Retrieve the line until the end is reached and detect unexpected events.
-
-        :raises exceptions.FishCapturedError: A fish is captured.
-        :raises exceptions.LineAtEndError: The line is at its end.
-        :raises exceptions.LineSnaggedError: The line is snagged.
-        """
+        """Retrieve the line until the end is reached and detect unexpected events."""
         logger.info("Pulling fish")
 
         if self.stage != StageId.PULL:
             self.stage = StageId.PULL
             self.timer.set_timeout_start_time()
+            
+        # Реакция на поклёвку: человек не начинает тянуть мгновенно (0.12-0.5 с)    
+        sleep(utils.human_reaction_time())
+        pull_start_time = time.monotonic()
+        self._pull_fallback = False
+        self._pull_finished = False
+        # Первое раскачивание не сразу, а после пары секунд подмотки
+        next_lift_time = pull_start_time + random.uniform(1.0, 3.0)
+
+        opt = PullOptions.from_cfg(self.cfg)
+        low_since = None  # с какого момента рыба на крючке, а натяжение минимальное
+        low_breaks = 0
+        snag_since = None  # с какого момента нет рыбы, а шкала красная
+        snag_samples = 0
+        snag_logged = False
+        last_state = None
+
         while True:
+            self.wait_for_game_focus()
+            # ---------------------------------------------------------
+            # АВТОРСКАЯ ПРОВЕРКА ОКОНЧАНИЯ СМОТКИ
+            # ---------------------------------------------------------
             if self.detection.is_retrieval_finished():
+                self._pull_finished = True
                 return
 
+            # ---------------------------------------------------------
+            # АВТОРСКАЯ ЛОГИКА
+            # ---------------------------------------------------------
             if self.cfg.ARGS.LIFT:
-                self.hold_mouse_button(LIFT_DURATION, button="right")
+                now = time.monotonic()
+                if now >= next_lift_time:
+                    # Рандомизация ±25% вокруг значения из конфига
+                    dur = opt.lift_duration * random.uniform(0.75, 1.25)
+                    rel = opt.lift_release_delay * random.uniform(0.75, 1.25)
+                    self.hold_mouse_button(dur, button="right")
+                    next_lift_time = time.monotonic() + rel
 
             if self.detection.is_fish_captured():
                 raise exceptions.FishCapturedError
-            if self.cfg.BOT.SPOOLING_DETECTION and self.detection.is_line_at_end():
+
+            # Один скриншот HUD: иконки рыбы, зацепа, шпули и шкала натяжения.
+            # None -- нет координат для этого окна или фолбэк выключен;
+            # тогда работают авторские проверки и таймер PULL_FALLBACK_DELAY.
+            state = (
+                self.detection.get_tension_state(red_from=opt.snag_red_from)
+                if opt.tension_fallback
+                else None
+            )
+
+            if self.cfg.BOT.SPOOLING_DETECTION and (
+                state.line_end if state is not None else self.detection.is_line_at_end()
+            ):
                 raise exceptions.LineAtEndError
-            if self.cfg.BOT.SNAG_DETECTION and self.detection.is_line_snagged():
+
+            if self.cfg.BOT.SNAG_DETECTION and (
+                state.snagged if state is not None else self.detection.is_line_snagged()
+            ):
                 raise exceptions.LineSnaggedError
+
             if self.timer.is_rare_event_checkable():
                 self.check_rare_events()
+
+            # ---------------------------------------------------------
+            # FALLBACK
+            # ---------------------------------------------------------
+            now = time.monotonic()
+            if state is None:
+                # Исходное поведение: просто таймер.
+                timeout = self.cfg.BOT.PULL_FALLBACK_DELAY
+                if now - pull_start_time >= timeout:
+                    logger.warning(
+                        "Pull fallback after %.1fs. Switching to lift.", timeout
+                    )
+                    self._pull_fallback = True
+                    self.lift()
+                    return
+            else:
+                if opt.log_state and (state.hooked, state.zone) != last_state:
+                    last_state = (state.hooked, state.zone)
+                    logger.info(
+                        "Pull state: fish=%s zone=%d fill=%dpx (%.0f%%)",
+                        state.hooked, state.zone, state.fill_px,
+                        100 * state.fill_px / BAR_HALF_WIDTH,
+                    )
+
+                # Нет рыбы + красная шкала = зацеп. Подтверждается несколькими
+                # замерами подряд в течение snag_delay секунд; любой замер
+                # вне условия начинает отсчёт заново.
+                if opt.snag_by_tension and not state.hooked and state.zone == ZONE_RED:
+                    if snag_since is None:
+                        snag_since, snag_samples = now, 0
+                    snag_samples += 1
+                    if (
+                        snag_samples >= opt.snag_samples
+                        and now - snag_since >= opt.snag_delay
+                    ):
+                        message = (
+                            "Snag by tension: no fish icon, bar in red zone "
+                            "(%d px, %d samples, %.1fs)."
+                        )
+                        if opt.snag_log_only:
+                            if not snag_logged:
+                                snag_logged = True
+                                logger.warning(
+                                    message + " Log only (SNAG_LOG_ONLY).",
+                                    state.fill_px, snag_samples, now - snag_since,
+                                )
+                        else:
+                            logger.warning(
+                                message, state.fill_px, snag_samples, now - snag_since
+                            )
+                            raise exceptions.LineSnaggedError
+                else:
+                    snag_since, snag_samples, snag_logged = None, 0, False
+
+                # Рыба на крючке, натяжение минимальное -> lift(). Короткие
+                # выбросы (low_tension_breaks - 1 замеров подряд) отсчёт не
+                # сбрасывают; пропажа иконки рыбы сбрасывает сразу.
+                if (
+                    opt.low_tension_fallback
+                    and state.hooked
+                    and state.fill_px < BAR_HALF_WIDTH * opt.low_tension_max
+                ):
+                    low_breaks = 0
+                    if low_since is None:
+                        low_since = now
+                    elif now - low_since >= opt.low_tension_delay:
+                        logger.warning(
+                            "Low tension fallback: fish hooked, tension below "
+                            "%.0f%% for %.1fs (%d px). Switching to lift.",
+                            100 * opt.low_tension_max, now - low_since, state.fill_px,
+                        )
+                        self._pull_fallback = True
+                        self.lift()
+                        return
+                elif low_since is not None:
+                    low_breaks += 1
+                    if not state.hooked or low_breaks >= opt.low_tension_breaks:
+                        low_since, low_breaks = None, 0
+
+                # Аварийный таймаут: защита от зависания, не обычный путь.
+                if (
+                    opt.emergency_delay > 0
+                    and now - pull_start_time >= opt.emergency_delay
+                ):
+                    logger.warning(
+                        "Emergency pull timeout after %.1fs. Switching to lift.",
+                        opt.emergency_delay,
+                    )
+                    self._pull_fallback = True
+                    self.lift()
+                    return
+
             sleep(add_jitter(LOOP_DELAY))
-            if self.timer.is_coffee_drinkable():
+
+            # Оба таймера срабатывают только если функция включена. Раньше при
+            # выключенной передаче (-GR) is_gear_ratio_changeable() после первой
+            # минуты вываживания был истинен ВСЕГДА, и тяжёлая рыба перезапускала
+            # pull() каждую секунду, пока бот не выходил из игры по лимиту повторов.
+            if self.cfg.ARGS.COFFEE and self.timer.is_coffee_drinkable():
                 raise exceptions.CoffeeTimeoutError
-            if self.timer.is_gear_ratio_changeable():
+
+            if (
+                self.cfg.ARGS.GEAR_RATIO
+                and not self.gear_ratio_changed
+                and self.timer.is_gear_ratio_changeable()
+            ):
                 raise exceptions.GearRatioTimeoutError
 
     def special_retrieve(self, button: str) -> None:
-        """Retrieve the line with special conditions (pause or lift).
-
-        :param button: The mouse button to use for retrieval.
-        :type button: str
-        """
         self.timer.set_timeout_start_time()
         while not self.timer.is_special_retrieve_timeout():
             self.hold_mouse_button(self.cfg.PROFILE.RETRIEVAL_DURATION, button)
@@ -226,7 +507,6 @@ class Tackle:
                 return
 
     def pirk(self) -> None:
-        """Start pirking until a fish is hooked."""
         logger.info("Performing pirking")
 
         if self.stage != StageId.PIRK:
@@ -237,21 +517,20 @@ class Tackle:
                 return
 
             if self.detection.is_fish_hooked_twice():
-                # If it's enabled, mouse was already pressed by hold_keys() outside
                 if not self.cfg.PROFILE.PIRK_RETRIEVAL:
-                    pag.click()
+                    utils.click(button="left")
                 return
 
             if self.cfg.PROFILE.PIRK_DURATION > 0:
                 if self.cfg.PROFILE.CTRL:
-                    pag.keyDown("ctrl")
+                    utils.key_down("ctrl")
                 if self.cfg.PROFILE.SHIFT:
-                    pag.keyDown("shift")
+                    utils.key_down("shift")
                 self.hold_mouse_button(self.cfg.PROFILE.PIRK_DURATION, button="right")
                 if self.cfg.PROFILE.CTRL:
-                    pag.keyUp("ctrl")
+                    utils.key_up("ctrl")
                 if self.cfg.PROFILE.SHIFT:
-                    pag.keyUp("shift")
+                    utils.key_up("shift")
                 sleep(
                     add_jitter(self.cfg.PROFILE.PIRK_DELAY, self.cfg.BOT.JITTER_SCALE)
                 )
@@ -262,22 +541,20 @@ class Tackle:
         raise exceptions.PirkTimeoutError
 
     def elevate(self) -> None:
-        """Perform elevator tactic (drop/rise) until a fish is hooked."""
         logger.info("Performing elevating")
-        locked = True  # Reel is locked after tackle.sink()
+        locked = True
         dropped = False
         if self.stage != StageId.ELEVATE:
             self.stage = StageId.ELEVATE
             self.timer.set_timeout_start_time()
         while not self.timer.is_elevate_stage_timeout():
             if self.detection.is_fish_hooked_twice():
-                # If it's enabled, mouse was already pressed by hold_keys() outside
                 if not self.cfg.PROFILE.PIRK_RETRIEVAL:
-                    pag.click()
+                    utils.click(button="left")
                 return
 
             if self.cfg.PROFILE.DROP and not dropped:
-                press("enter")
+                utils.press("enter")
                 if locked:
                     delay = self.cfg.PROFILE.ELEVATE_DELAY
                 else:
@@ -295,46 +572,75 @@ class Tackle:
                 dropped = not dropped
 
     def lift(self) -> None:
-        """Pull the fish until it's captured."""
         logger.info("Lifting rod")
         if self.stage != StageId.LIFT:
             self.stage = StageId.LIFT
             if self.cfg.PROFILE.MODE == "telescopic":
-                press("space")
+                utils.press("space")
             self.timer.set_timeout_start_time()
         if self.cfg.PROFILE.MODE == "telescopic":
             self._telescopic_lift()
         else:
             self._lift()
 
-    @utils.toggle_right_mouse_button  # TODO: FIX THIS
+    @utils.toggle_right_mouse_button
     def _lift(self) -> None:
-        """Pull the fish until it's captured."""
+        logger.info("LIFT handler entered")
+
+        is_fallback = self._pull_fallback
+        self._pull_fallback = False
+        # Леска смотана до конца: подсак после короткого подъёма, а не по LIFT-таймауту.
+        finished = getattr(self, "_pull_finished", False) and not is_fallback
+        self._pull_finished = False
+        net_delay = PullOptions.from_cfg(self.cfg).net_after_finish_delay
+        early = finished and net_delay > 0
+        if early:
+            logger.info("Line fully retrieved. Netting after %.1fs of lifting.", net_delay)
+            net_at = time.monotonic() + net_delay * random.uniform(0.9, 1.2)
+
         while not self.timer.is_lift_stage_timeout():
+            if early and time.monotonic() >= net_at:
+                break
             sleep(add_jitter(LOOP_DELAY))
+
             if self.detection.is_fish_captured():
+                logger.info("Fish captured during lift (yanked out).")
                 return
+
             if self.cfg.BOT.SNAG_DETECTION and self.detection.is_line_snagged():
                 raise exceptions.LineSnaggedError
+
             if self.timer.is_rare_event_checkable():
                 self.check_rare_events()
-            if self.timer.is_coffee_drinkable():
+
+            if self.cfg.ARGS.COFFEE and self.timer.is_coffee_drinkable():
                 raise exceptions.CoffeeTimeoutError
 
         if not self.detection.is_fish_hooked():
             return
-        if self.detection.is_retrieval_finished():
-            press("space")
-            sleep(add_jitter(LANDING_NET_DURATION))
-            if self.detection.is_fish_captured():
-                return
-            press("space")
-            sleep(add_jitter(ANIMATION_DELAY))
+
+        # Если рыба на крючке есть и этап подъема завершился — всегда пробуем подсак
+        logger.info(
+            "%s Opening landing net. fallback=%s, finished=%s",
+            "Line retrieved." if early else "Lift timeout reached.",
+            is_fallback,
+            finished,
+        )
+        # Микро-пауза перед подсаком, как человек целится
+        sleep(random.uniform(0.3, 0.8))
+        press("space")
+        sleep(add_jitter(LANDING_NET_DURATION))
+
+        if self.detection.is_fish_captured():
+            return
+
+        logger.info("Fish not netted. Hiding landing net.")
+        press("space")
+        sleep(add_jitter(ANIMATION_DELAY))
+
         raise exceptions.LiftTimeoutError
 
     def _telescopic_lift(self) -> None:
-        """Pull the fish until it's captured, designed for telescopic rod."""
-        # Check false postive first because it happens often
         if not self.detection.is_fish_hooked():
             return
 
@@ -346,49 +652,67 @@ class Tackle:
                 raise exceptions.LineSnaggedError
             if self.timer.is_rare_event_checkable():
                 self.check_rare_events()
-            if self.timer.is_coffee_drinkable():
+            if self.cfg.ARGS.COFFEE and self.timer.is_coffee_drinkable():
                 raise exceptions.CoffeeTimeoutError
         raise exceptions.LiftTimeoutError
 
     def change_gear_ratio_or_electro_mode(self) -> None:
-        """Switch the gear ratio or electro assist mode."""
         logger.info("Changing gear ratio / electro assist mode")
-        with pag.hold("ctrl"):
-            press("space")
+        utils.key_down("ctrl")
+        try:
+            utils.press("space")
+        finally:
+            utils.key_up("ctrl")
         self.gear_ratio_changed = not self.gear_ratio_changed
 
     def move_mouse_randomly(self) -> None:
-        """Randomly move the mouse for four times."""
         logger.info("Moving mouse randomly")
-        coords = []
-        for _ in range(NUM_OF_MOVEMENT - 1):
-            x, y = random.randint(-OFFSET, OFFSET), random.randint(-OFFSET, OFFSET)
-            coords.append((x, y))
-        coords.append((-sum(x for x, _ in coords), -sum(y for _, y in coords)))
-        for x, y in coords:
-            win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, x, y, 0, 0)
-            sleep(add_jitter(ANIMATION_DELAY))
+
+        dx = random.randint(-150, 150)
+        dy = random.randint(-90, 90)
+
+        if utils.is_hw_active():
+            utils.hw_move_mouse_bezier(dx, dy)
+            sleep(random.uniform(0.12, 0.28))
+            utils.hw_move_mouse_bezier(-dx, -dy)
+        else:
+            steps_out = random.randint(14, 24)
+            x_steps_out = utils.generate_non_linear_steps(dx, steps_out)
+            y_steps_out = utils.generate_non_linear_steps(dy, steps_out)
+
+            for step_x, step_y in zip(x_steps_out, y_steps_out):
+                ctypes.windll.user32.mouse_event(
+                    0x0001, int(step_x), int(step_y), 0, 0
+                )
+                sleep(random.gauss(0.010, 0.002))
+
+            sleep(random.uniform(0.12, 0.32))
+
+            steps_in = random.randint(14, 24)
+            x_steps_in = utils.generate_non_linear_steps(-dx, steps_in)
+            y_steps_in = utils.generate_non_linear_steps(-dy, steps_in)
+
+            for step_x, step_y in zip(x_steps_in, y_steps_in):
+                jitter_x = random.choice([-1, 0, 1]) if random.random() < 0.3 else 0
+                jitter_y = random.choice([-1, 0, 1]) if random.random() < 0.3 else 0
+                ctypes.windll.user32.mouse_event(
+                    0x0001, int(step_x + jitter_x), int(step_y + jitter_y), 0, 0
+                )
+                sleep(random.gauss(0.010, 0.002))
 
     def equip_item(self, item) -> None:
-        """Equip an item from the menu or inventory.
-
-        :param item: The item to equip (e.g., lure, pva, dry_mix, groundbait).
-        :type item: str
-        """
         if item == "lure":
             self._equip_item_from_menu(item)
         else:
-            self._equip_item_from_inventory(item)  # groundbait, dry_mix, pva
+            self._equip_item_from_inventory(item)
 
     def _equip_item_from_menu(self, item: str) -> None:
-        """Equip an item from the menu.
-
-        :param item: The item to equip (e.g., lure).
-        :type item: str
-        """
         logger.info("Equiping new %s from menu", item)
-        with pag.hold("b"):
+        utils.key_down("b")
+        try:
             self._equip_favorite_item(item)
+        finally:
+            utils.key_up("b")
         sleep(add_jitter(ANIMATION_DELAY))
 
     @utils.press_before_and_after("v")
@@ -401,43 +725,50 @@ class Tackle:
         :type item: Literal["dry_mix", "groundbait"]
         """
         logger.info("Equiping new %s from inventory", item)
-        scrollbar_position = self.detection.get_scrollbar_position()
-        if scrollbar_position is None:
-            pag.click(utils.get_box_center_integers(self.get_item_position(item)))
+
+        # Сначала проверяем предмет на первом экране.
+        position = self.get_item_position(item)
+        if position is not None:
+            x, y = utils.get_box_center_integers(position)
+            utils.move_to(x, y)
+            utils.click(button="left")
             self._equip_favorite_item(item)
             return
 
-        pag.moveTo(utils.get_box_center_integers(scrollbar_position))
+        scrollbar_position = self.detection.get_scrollbar_position()
+        if scrollbar_position is None:
+            return
+
+        scrollbar_x, scrollbar_y = utils.get_box_center_integers(scrollbar_position)
+        utils.move_to(scrollbar_x, scrollbar_y)
+
         for _ in range(5):
             sleep(add_jitter(ANIMATION_DELAY))
-            pag.drag(xOffset=0, yOffset=125, duration=0.5, button="left")
+
+            # Универсальный drag: utils сам решит, использовать плату или pag.
+            utils.mouse_down("left")
+            sleep(0.15)
+            utils.hw_move_mouse_bezier(0, 125, steps=15, register_session=False)
+            sleep(0.15)
+            utils.mouse_up("left")
+
             position = self.get_item_position(item)
             if position is not None:
-                pag.click(utils.get_box_center_integers(position))
+                px, py = utils.get_box_center_integers(position)
+                utils.move_to(px, py)
+                utils.click(button="left")
                 self._equip_favorite_item(item)
                 break
 
     def get_item_position(self, item: str) -> Box | None:
-        """Get the position of an item.
-        :param item: The item to get the position for (e.g., pva, dry_mix, groundbait)
-        :type item: str
-        :return: position of the item
-        :rtype: Box | None
-        """
         if item == "groundbait":
             return self.detection.get_groundbait_position()
         elif item == "dry_mix":
             return self.detection.get_dry_mix_position()
-        else:  # pva
+        else:
             return self.detection.get_pva_position()
 
-    def _equip_favorite_item(self, item: bool):
-        """Select a favorite item for replacement and replace the broken one.
-
-        :param item: The item to equip (e.g., lure, pva, dry_mix, groundbait).
-        :type item: str
-        :raises exceptions.ItemNotFoundError: The item was not found.
-        """
+    def _equip_favorite_item(self, item: str):
         sleep(add_jitter(ANIMATION_DELAY))
         logger.info("Looking for favorite items")
         favorite_item_positions = list(self.detection.get_favorite_item_positions())
@@ -446,19 +777,27 @@ class Tackle:
 
         for favorite_item_position in favorite_item_positions:
             x, y = utils.get_box_center_integers(favorite_item_position)
-            if item == "lure" and pag.pixel(x - 70, y + 190) == (178, 59, 30):
+            if item == "lure" and self.detection._get_pixel(x - 70, y + 190) == (178, 59, 30):
                 continue
-            pag.click(x - 70, y + 190, clicks=2, interval=0.1)
+            
+            utils.move_to(x - 70, y + 190)
+            sleep(random.uniform(0.35, 0.65))
+            utils.mouse_down("left")
+            sleep(random.uniform(0.045, 0.085))
+            utils.mouse_up("left")
+            sleep(random.uniform(0.06, 0.12))
+            utils.mouse_down("left")
+            sleep(random.uniform(0.045, 0.085))
+            utils.mouse_up("left")
+            
             logger.info("New %s equiped successfully", item)
             return
 
-        # Close selection window when equiping from inventory
         if item in ("dry_mix", "groundbait"):
-            press("esc")
+            utils.press("esc")
         raise exceptions.ItemNotFoundError
 
     def _monitor_float_state(self) -> None:
-        """Monitor the state of the float."""
         logger.info("Monitoring float state")
         reference_img = pag.screenshot(region=self.detection.float_camera_rect)
         blurred = reference_img.filter(ImageFilter.GaussianBlur(radius=3))
@@ -473,7 +812,6 @@ class Tackle:
         raise exceptions.DriftTimeoutError
 
     def _monitor_clip_state(self) -> None:
-        """Monitor the state of the bolognese clip."""
         logger.info("Monitoring clip state")
         self.timer.set_timeout_start_time()
         while not self.timer.is_drift_stage_timeout():
@@ -486,35 +824,33 @@ class Tackle:
         raise exceptions.DriftTimeoutError
 
     def hold_mouse_button(self, duration: float = 1, button: str = "left") -> None:
-        """Hold left or right mouse button.
-
-        :param duration: Hold time, defaults to 1.
-        :type duration: float, optional
-        :param button: Button to click, defaults to "left".
-        :type button: str, optional
-        """
         if duration == 0:
             return
 
-        pag.mouseDown(button=button)
-        sleep(add_jitter(duration))
-        pag.mouseUp(button=button)
-        # + 0.1 due to pag.mouseDown() delay
+        if button == "left":
+            utils.hw_hold_left_with_jitter(duration)
+        else:
+            utils.mouse_down("right")
+            try:
+                sleep(add_jitter(duration))
+            finally:
+                utils.mouse_up("right")
+
         if self.cfg.BOT.CLICK_LOCK and button == "left" and duration >= 2.1:
-            pag.click()
+            utils.click(button="left")
 
     def hold_mouse_buttons(self, duration: float = 1) -> None:
-        """Hold left and right mouse buttons simultaneously.
+        utils.key_down("ctrl")
+        try:
+            utils.mouse_down("left")
+            utils.mouse_down("right")
+            try:
+                sleep(add_jitter(duration))
+            finally:
+                utils.mouse_up("left")
+                utils.mouse_up("right")
+        finally:
+            utils.key_up("ctrl")
 
-        :param duration: Hold time, defaults to 1.
-        :type duration: float, optional
-        """
-        with pag.hold("ctrl"):
-            pag.mouseDown()
-            pag.mouseDown(button="right")
-            sleep(add_jitter(duration))
-            pag.mouseUp()
-            pag.mouseUp(button="right")
-        # + 0.1 due to pag.mouseDown() delay
         if self.cfg.BOT.CLICK_LOCK and duration >= 2.1:
-            pag.click()
+            utils.click(button="left")

@@ -1,3 +1,32 @@
+## Next release
+### 🆕 New Features
+- Build: the bot ships as open .py files (no compilation or obfuscation); only the launcher and the license module are compiled and obfuscated. LICENSE, NOTICE and SOURCE.txt (GPL-3.0) are added to the install. The --compile-bot flag restores the old full compilation.
+- License: key verification moved from the bot into the launcher (closed module); the bot is open and runs without a key via main.py, like the original. The launcher checks the license before starting and every ~10 minutes while running.
+- Launcher: the bot is started with a cleaned environment (no PYTHON* variables, PyInstaller internals or launcher folders in PATH), so launcher variables cannot override module lookup.
+- Launcher: the remaining output of the bot process is now read after it exits, so error messages are no longer cut off mid-word.
+- Launcher: vertical separators between the flag columns, matching the frame colour.
+- Launcher: the trailing flags in parentheses like "(-c)" are removed from checkbox labels; the flag is shown in the hover tooltip.
+- Route recording: the console now shows time, position and compass heading on every A/D press; the final leg list includes coordinates and heading per leg. Recording messages are translated to English.
+- Route trolling: the pause after stowing the rod before pressing J is raised to 2 s (the animation is long).
+- Route trolling: the "boat is standing, pressing J" check no longer fires while the rod is in hand (the game ignores J then): the bot waits until the rod is back on its stand.
+- Route trolling: the heading correction limit for drifting off the line is raised from 20 to 35 degrees so the bot copes with wind and current drift.
+- Compass: a stray digit left of the coordinates (a bright map detail read as "1", 154 -> 1154) is no longer accepted as a position jump when recording or following a route.
+- Retrieval-end detection by the wheel ring now also works with a dim HUD (dawn, dusk): the fill is ~180 instead of ~238, and the bot used to miss the wheel and wait for the low-tension fallback lift.
+- Rod placement: default step is now 0.15 s; before casting rods 2 and 3 the bot first steps right (`SHIFT_BEFORE_CAST`), then casts. The friction brake is fully re-synced for every rod during placement, not just the first one.
+- Launcher hotkeys F7/F8 are now polled directly (GetAsyncKeyState) instead of relying only on a hook: stop is no longer lost during a hookset or while playing a fish.
+- On start (except bottom mode) the bot equips the main rod (`KEY.MAIN_ROD`) itself: previously, with a shovel in hand it hung on "Resetting tackle".
+- Bottom mode: the bot casts and places the rods on their stands at start (`BOT.ROD_PLACEMENT`). If the game shows the red "cannot place the rod stand here" banner, the bot takes a short sidestep (`STEPS`: rod 1 back, rods 2-3 right) and retries. The `-SC` flag disables placement: set the rods up manually as before.
+- End of line retrieval for regular line is now detected by the fill of the spool icon ring (`BOT.WHEEL_BY_FILL`, enabled by default); the lift threshold is set by `BOT.WHEEL_RING_MAX_GAP` (0.036 ≈ 4 m). Works only with HDR turned off.
+- The `-d` flag now also enables debug output: detailed retrieval-end detection logs (rainbow and regular line), friction brake, compass, hardware input tracing and snapshots of disputed frames in `screenshots/wheel_debug`.
+- The bot waits for the game window after alt+tab or minimizing and resumes retrieval (except telescopic mode, which still recasts).
+- Adaptive brightness threshold for the boat ticket renewal hint (text is darker at night); added `static/en/ticket_next_hint.png` for the English client.
+
+### 🐛 Bug Fixes
+- HID command order to the emulation board is no longer broken by the friction brake scroll stream (the cast power bar could hang with the mouse held).
+
+### 📝 Note
+- **HDR must be turned off** in Windows and in the game.
+
 ## 0.11.0 (2026-05-21)
 ### 🆕 New Features
 - Introduced new setting `BOT.CATCH_SCREEN_STYLE` to decide whether to wait for a possible tropy/rare trophy animation.

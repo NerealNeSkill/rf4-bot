@@ -14,3 +14,24 @@ src/__pycache__/
 /logs/
 /dist/
 /config.yaml
+# --- added by optimization ---
+build/license_private.key
+license.key
+license_*.key
+build/stage/
+build/__pycache__/
+_internal/
+installer/Output/
+graphify-out/
+_to_delete/
+*.pyc
+*.pyd
+_quick_cython_build/
+build/time_private.key
+server/node_modules/
+server/.wrangler/
+
+# admin tools
+admin/*.exe
+admin/*.key
+_public_export*/

@@ -1,3 +1,13 @@
+# RF4Bot (fork of RussianFishing4Script)
+
+Форк [RussianFishing4Script](https://github.com/dereklee0310/RussianFishing4Script) (RF4S) авторства Derek Lee.
+Распространяется по лицензии **GNU GPL v3** (см. `LICENSE`, `NOTICE`). Исходный код открыт целиком.
+
+Запуск из исходников, как у оригинала: `python main.py` (см. ниже и `docs/`).
+Удобный лаунчер, автообновления и поддержку можно получить отдельно: https://rf4-bot.ru/
+
+---
+
 **[[中文版]][readme_zh-TW]** **[[Русская версия]][readme_ru]**
 <div align="center">
 

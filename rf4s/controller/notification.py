@@ -17,6 +17,7 @@ from yacs.config import CfgNode as CN
 
 from rf4s.controller.logger import logger
 
+NET_TIMEOUT = 15  # секунд; сеть не должна вешать остановку бота
 ICON_URL = "https://i.ibb.co/RpLYcdkm/icon.png"
 
 # Name                             | Int value | Hex code
@@ -32,24 +33,48 @@ ICON_URL = "https://i.ibb.co/RpLYcdkm/icon.png"
 
 def send_screenshot(cfg: CN, filepath: Path) -> None:
     if cfg.ARGS.DISCORD:
-        DiscordNotification(cfg).send_screenshot(filepath)
+        try:
+            DiscordNotification(cfg).send_screenshot(filepath)
+        except Exception as err:
+            logger.error("DiscordNotification failed: %s", err)
     if cfg.ARGS.EMAIL:
-        EmailNotification(cfg).send_screenshot(filepath)
+        try:
+            EmailNotification(cfg).send_screenshot(filepath)
+        except Exception as err:
+            logger.error("EmailNotification failed: %s", err)
     if cfg.ARGS.MIAOTIXING:
-        MiaotixingNotification(cfg).send_screenshot(filepath)
+        try:
+            MiaotixingNotification(cfg).send_screenshot(filepath)
+        except Exception as err:
+            logger.error("MiaotixingNotification failed: %s", err)
     if cfg.ARGS.TELEGRAM:
-        TelegramNotification(cfg).send_screenshot(filepath)
+        try:
+            TelegramNotification(cfg).send_screenshot(filepath)
+        except Exception as err:
+            logger.error("TelegramNotification failed: %s", err)
 
 
 def send_result(cfg: CN, result: dict) -> None:
     if cfg.ARGS.DISCORD:
-        DiscordNotification(cfg).send_result(result)
+        try:
+            DiscordNotification(cfg).send_result(result)
+        except Exception as err:
+            logger.error("DiscordNotification failed: %s", err)
     if cfg.ARGS.EMAIL:
-        EmailNotification(cfg).send_result(result)
+        try:
+            EmailNotification(cfg).send_result(result)
+        except Exception as err:
+            logger.error("EmailNotification failed: %s", err)
     if cfg.ARGS.MIAOTIXING:
-        MiaotixingNotification(cfg).send_result(result)
+        try:
+            MiaotixingNotification(cfg).send_result(result)
+        except Exception as err:
+            logger.error("MiaotixingNotification failed: %s", err)
     if cfg.ARGS.TELEGRAM:
-        TelegramNotification(cfg).send_result(result)
+        try:
+            TelegramNotification(cfg).send_result(result)
+        except Exception as err:
+            logger.error("TelegramNotification failed: %s", err)
 
 
 class DiscordColor(Enum):
@@ -78,11 +103,13 @@ class DiscordNotification:
         return capture.get().strip()
 
     def _get_webhook(self) -> DiscordWebhook:
-        return DiscordWebhook(
+        webhook = DiscordWebhook(
             url=self.cfg.BOT.NOTIFICATION.DISCORD_WEBHOOK_URL,
             username="RF4S",
             avatar_url=ICON_URL,
         )
+        webhook.timeout = NET_TIMEOUT  # атрибут есть в discord-webhook; не зависит от сигнатуры
+        return webhook
 
     def _get_embed(self, title: str) -> DiscordEmbed:
         return DiscordEmbed(
@@ -190,7 +217,7 @@ class MiaotixingNotification:
             {"id": self.cfg.BOT.NOTIFICATION.MIAO_CODE, "text": text, "type": "json"}
         )
 
-        with request.urlopen(url) as page:
+        with request.urlopen(url, timeout=NET_TIMEOUT) as page:
             result = page.read()
             json_object = json.loads(result)
             if json_object["code"] == 0:
@@ -232,6 +259,7 @@ class TelegramNotification:
             "https://api.telegram.org/"
             f"bot{self.cfg.BOT.NOTIFICATION.TELEGRAM_BOT_TOKEN}/sendMessage",
             json=payload,
+            timeout=NET_TIMEOUT,
         )
         self._check_response_status(response)
 
@@ -248,5 +276,6 @@ class TelegramNotification:
                 f"bot{self.cfg.BOT.NOTIFICATION.TELEGRAM_BOT_TOKEN}/sendPhoto",
                 data=payload,
                 files=files,
+                timeout=NET_TIMEOUT,
             )
         self._check_response_status(response)
