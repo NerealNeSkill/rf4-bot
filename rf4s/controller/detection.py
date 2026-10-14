@@ -1128,6 +1128,47 @@ class Detection:
         self.last_hint_note = f"сходство {score:.2f} (порог яркости {thr:.0f})"
         return score >= 0.75
 
+    def _troll_label_masks(self):
+        """Маски подписей у клавиши J: (идёт, стоит) из static/<язык>/troll_j_on.png и troll_j_off.png."""
+        cached = getattr(self, "_troll_label_tpl", False)
+        if cached is not False:
+            return cached
+        out = []
+        for name in ("troll_j_on", "troll_j_off"):
+            tpl = cv2.imread(str(self.image_dir / f"{name}.png"), cv2.IMREAD_GRAYSCALE)
+            out.append(None if tpl is None else (tpl > 127).astype(np.float32))
+        self._troll_label_tpl = tuple(out) if all(t is not None for t in out) else None
+        return self._troll_label_tpl
+
+    def trolling_state(self):
+        """Режим тролинга в игре по подписи у J справа сверху: True - лодка идёт («Остановиться»/«Stop»),
+        False - стоит («Троллинговый ход»/«Trolling mode»), None - подпись не прочиталась."""
+        self.last_troll_scores = None
+        tpls = self._troll_label_masks()
+        if tpls is None:
+            return None
+        try:
+            left, top, width, _height = self.window.get_box()
+            bw, bh = 290, 170
+            shot = pag.screenshot(region=(int(left + width - bw), int(top + 190), bw, bh))
+            gray = np.asarray(shot.convert("RGB"), dtype=np.float32).mean(axis=2)
+        except Exception:  # noqa: BLE001
+            return None
+        thr = min(205.0, max(120.0, 0.85 * float(gray.max())))
+        mask = (gray >= thr).astype(np.float32)
+        scores = []
+        for tpl in tpls:
+            if mask.shape[0] < tpl.shape[0] or mask.shape[1] < tpl.shape[1] or not mask.any():
+                return None
+            scores.append(float(cv2.matchTemplate(mask, tpl, cv2.TM_CCOEFF_NORMED).max()))
+        on, off = scores
+        self.last_troll_scores = (round(on, 2), round(off, 2), round(thr))
+        if on >= 0.85 and on > off:
+            return True
+        if off >= 0.85 and off > on:
+            return False
+        return None
+
     def is_keepnet_full(self):
         return self._get_image_box("keepnet_is_full", 0.9)
 

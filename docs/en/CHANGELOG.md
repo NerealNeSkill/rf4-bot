@@ -1,5 +1,10 @@
 ## Next release
 ### 🆕 New Features
+- Route trolling: the bot reads the caption next to J ("Trolling mode" / "Stop") and checks every J press; if the game swallowed it (hands busy), J is pressed again. The route clock starts only after the boat is confirmed moving. After a fish handled via the error path the rod is also stowed and the bot waits before J.
+- Route trolling: bite check right after the cast, then `0` and J ~1 s later; the compass position is refined on the move, and the rod is not taken after J until the usual check interval.
+- Route trolling: right after the cast the bot checks for a bite (while the rod is still in hands) and only then stows the rod and restarts the boat. Pauses around J are shorter (2.5 s after stowing, 1 s after J).
+- Route trolling: after a fish and the boat restart the rod is no longer taken at once; the bot waits the usual check interval (CHECK_DELAY). After the ticket dialog the rod is put away (`0`) and the bot waits for the animation before J.
+- Route trolling: the pause after stowing the rod before J is now 4 s, and there is a 2 s pause after the boat starts before the rod is taken again.
 - Build: the bot ships as open .py files (no compilation or obfuscation); only the launcher and the license module are compiled and obfuscated. LICENSE, NOTICE and SOURCE.txt (GPL-3.0) are added to the install. The --compile-bot flag restores the old full compilation.
 - License: key verification moved from the bot into the launcher (closed module); the bot is open and runs without a key via main.py, like the original. The launcher checks the license before starting and every ~10 minutes while running.
 - Launcher: the bot is started with a cleaned environment (no PYTHON* variables, PyInstaller internals or launcher folders in PATH), so launcher variables cannot override module lookup.

@@ -31,6 +31,13 @@ ANIMATION_DELAY = 0.5
 # Пауза между постановкой удилища в подставку и нажатием J: пока идёт анимация ("руки заняты"),
 # игра J не принимает и троллинг не включается.
 TROLL_HOLDER_SETTLE = 3.5
+# Пауза после укладки удилища в подставку (press("0")) перед J: пока идёт анимация укладки, J игра не принимает
+ROD_STOW_DELAY = 1.5
+# Пауза после J (старт лодки) перед тем, как снова взять удилище в руки
+AFTER_J_DELAY = 1.0
+# Проверка рыбы сразу после заброса: пауза перед проверкой и предел подряд идущих поклёвок
+RECAST_RECHECK_DELAY = 1.5
+RECAST_RECHECK_LIMIT = 3
 LOOP_DELAY = 1
 USE_ITEM_DELAY = 1
 BAD_CAST_DELAY = 1
@@ -286,6 +293,7 @@ class Player:
             if self.cfg.PROFILE.MODE in ("bottom", "troll"):
                 with self.loop_restart_handler():
                     self.recast_tackle()
+                    self._stow_after_recast()
         except exceptions.LureBrokenError:
             self._handle_broken_lure()
         except exceptions.TicketExpiredError:
@@ -304,6 +312,7 @@ class Player:
                 
                 if self.cfg.PROFILE.MODE in ("bottom", "troll"):
                     self.recast_tackle()
+                    self._stow_after_recast()
         except exceptions.StuckAtCastingError:
             self._pause_route()
             with self.hold_keys(mouse=False, shift=False):
@@ -311,6 +320,7 @@ class Player:
             if self.cfg.PROFILE.MODE in ("bottom", "troll"):
                 with self.loop_restart_handler():
                     self.recast_tackle()
+                    self._stow_after_recast()
         except exceptions.LineAtEndError:
             if self.cfg.ARGS.FRICTION_BRAKE:
                 with self.friction_brake.lock:
@@ -507,7 +517,18 @@ class Player:
                 self._pause_route()
                 self._handle_expired_ticket()
                 sleep(add_jitter(ANIMATION_DELAY))
+            if getattr(self, "_ticket_ui_used", False):
+                # После окна билетов в руках может оказаться удилище, а J с удилищем в руках игра не
+                # принимает: убираем руки ("0" безвредна, если там пусто) и ждём конец анимации.
+                self._ticket_ui_used = False
+                press("0")
+                sleep(add_jitter(ROD_STOW_DELAY))
             self.enable_trolling()
+            if getattr(self, "_wait_before_check", False):
+                # После рыбы проверка удилища шла сразу после старта лодки: ждём обычный интервал проверок
+                # (в ветке без рыбы эту паузу даёт _put_down_tackle), и удилище не берётся сразу после J.
+                self._wait_before_check = False
+                sleep(add_jitter(self.cfg.PROFILE.CHECK_DELAY, jitter_percent=0.15))
             self.refill_stats()
             # SAFE POINT: SessionManager может работать только здесь. Привязано к -m.
             if self.cfg.ARGS.MOUSE:
@@ -523,22 +544,46 @@ class Player:
                     if self.detection.is_fish_hooked():
                         check_miss_counts[self.tackle_idx] = 0
                         self.retrieve_and_recast()
+                        self._recheck_after_recast(check_miss_counts)
+                        self._wait_before_check = True
                         press("0")  # удилище в подставку перед отплытием
                         # Ждём конец анимации укладки: J, нажатая во время анимации,
                         # игрой проглатывается, и троллинг не включается.
-                        sleep(add_jitter(2.0))
+                        sleep(add_jitter(ROD_STOW_DELAY))
                     else:
                         sleep(add_jitter(self.cfg.PROFILE.PUT_DOWN_DELAY))
                         if self.detection.is_fish_hooked():
                             check_miss_counts[self.tackle_idx] = 0
                             self.retrieve_and_recast()
+                            self._recheck_after_recast(check_miss_counts)
+                            self._wait_before_check = True
                             press("0")
-                            sleep(add_jitter(2.0))
+                            sleep(add_jitter(ROD_STOW_DELAY))
                         else:
                             self._put_down_tackle(check_miss_counts)
             finally:
                 self.rod_in_hands = False
             self._update_tackle()
+
+    def _stow_after_recast(self) -> None:
+        """Маршрутный троллинг, заброс через обработчик исключений: рыба-после-заброса, "0", пауза укладки,
+        иначе J нажмётся во время анимации ("руки заняты") и удилище проверится сразу после J."""
+        if self.cfg.ARGS.TROLLING != "route":
+            return
+        self._recheck_after_recast([0] * max(len(self.tackles), 1))
+        self._wait_before_check = True
+        press("0")
+        sleep(add_jitter(ROD_STOW_DELAY + 0.5))
+
+    def _recheck_after_recast(self, check_miss_counts: list[int]) -> None:
+        """Сразу после заброса рыба могла клюнуть: проверяем, пока удилище ещё в руках (до J и укладки)."""
+        for _ in range(RECAST_RECHECK_LIMIT):
+            sleep(add_jitter(RECAST_RECHECK_DELAY))
+            if not self.detection.is_fish_hooked():
+                return
+            logger.info("Fish hooked right after the cast")
+            check_miss_counts[self.tackle_idx] = 0
+            self.retrieve_and_recast()
 
     def _rod_key(self) -> str:
         """Клавиша слота удилища: донка берёт из BOTTOM_RODS, троллинг - MAIN_ROD."""
@@ -1127,9 +1172,8 @@ class Player:
                     "Route trolling: coordinate nav is dead (%r), continuing time-only",
                     runner.nav_failed,
                 )
-            if not runner.moving:
-                sleep(add_jitter(TROLL_HOLDER_SETTLE))
-            runner.resume()  # ничего не делает, если лодка уже плывёт
+            # J сразу (через ~1 с после укладки удилища); позицию по компасу уточняем уже на ходу
+            runner.resume(quick=True)  # ничего не делает, если лодка уже плывёт
             return
 
         if self.cfg.PROFILE.MODE not in ("bottom", "troll"):
@@ -1155,10 +1199,11 @@ class Player:
             getattr(self.cfg.ARGS, "TROLL_NO_CAST", False)
             or "--troll-no-cast" in sys.argv
         )
+        # Поиск компаса занимает несколько секунд: делаем его ДО заброса, чтобы J нажималась
+        # сразу после укладки удилища, а не после поиска.
+        position_fn = self._make_position_fn(route)
         if not no_cast:
             self._cast_for_trolling()
-
-        position_fn = self._make_position_fn(route)
         nav_mode = (
             getattr(self.cfg.ARGS, "TROLL_NAV", None)
             or self._argv_option("--troll-nav")
@@ -1183,9 +1228,11 @@ class Player:
             route, utils, log=logger.info, position_fn=position_fn,
             nav_params=nav_params, diag_path=diag_path, relocate_on_resume=relocate,
             rod_busy_fn=lambda: self.rod_in_hands,
+            state_fn=self.detection.trolling_state,
         )
         try:
             self.route_runner.start()
+            self._wait_before_check = True   # удилище не берём сразу после J
         except Exception as err:  # noqa: BLE001
             self.route_runner = None
             self.general_quit(f"Route trolling could not start: {err!r}")
@@ -1257,17 +1304,20 @@ class Player:
             press(self._rod_key())
             sleep(add_jitter(ANIMATION_DELAY))
             self.cast_tackle(lock=True)
+            # рыба могла клюнуть сразу после заброса -- проверяем, пока удилище в руках
+            self._recheck_after_recast([0] * max(len(self.tackles), 1))
             press("0")
             # Анимация укладки: J, нажатая во время неё, игрой проглатывается
-            sleep(add_jitter(2.0))
+            sleep(add_jitter(ROD_STOW_DELAY))
         finally:
             self.rod_in_hands = False
 
     def _pause_route(self) -> None:
         """Остановить лодку на время вываживания; продолжение -- в enable_trolling()."""
         runner = getattr(self, "route_runner", None)
-        if runner is not None:
-            runner.pause()
+        if runner is None:
+            return
+        runner.pause()
 
     def _update_tackle(self) -> None:
         candidates = self._get_available_rods()
@@ -1643,6 +1693,7 @@ class Player:
             self.result.ticket += 1
             sleep(add_jitter(ANIMATION_DELAY))
         logger.info("Next boat ticket selected (%s day)", duration)
+        self._ticket_ui_used = True
         return True
 
     def _handle_expired_ticket(self) -> None:
@@ -1662,6 +1713,7 @@ class Player:
             self._hybrid_click_at(ticket_loc, clicks=2)
             
             self.result.ticket += 1
+            self._ticket_ui_used = True
             sleep(add_jitter(ANIMATION_DELAY))
 
     @utils.press_before_and_after("v")

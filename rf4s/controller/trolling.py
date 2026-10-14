@@ -527,11 +527,18 @@ class RouteRunner:
 
     def __init__(self, route: Route, io, log=None, tick: float = 0.05, clock=time.monotonic,
                  position_fn=None, nav_params=None, diag_path: Path | None = None,
-                 relocate_on_resume: bool = False, rod_busy_fn=None):
+                 relocate_on_resume: bool = False, rod_busy_fn=None, state_fn=None):
         route.validate()
         # rod_busy_fn() -> True, пока удилище в руках: J с удилищем в руках игра не принимает,
         # поэтому "лодка стоит -> нажимаю J" откладываем до того, как удилище уберут в подставку.
         self._rod_busy_fn = rod_busy_fn
+        # state_fn() -> True/False/None: режим тролинга в игре по подписи у клавиши J в списке подсказок
+        # («Остановиться» - идёт, «Троллинговый ход» - стоит); None - не прочиталось.
+        self._state_fn = state_fn
+        # Включён ли режим тролинга в игре (по нашему счёту нажатий J). J с удилищем в руках игра не
+        # принимает, поэтому пауза при вываживании J не жмёт: лодка идёт дальше, а возобновление
+        # не должно нажимать J повторно (иначе оно выключило бы тролинг).
+        self.game_on = False
         self.route, self._io, self._tick, self._clock = route, io, tick, clock
         _base_log = log or (lambda msg: None)
         self._log = lambda msg: _base_log(_tr(msg))
@@ -626,7 +633,8 @@ class RouteRunner:
                 self._halt()
                 self._log("Маршрут: пауза, лодка остановлена")
 
-    def resume(self) -> None:
+    def resume(self, quick: bool = False) -> None:
+        """Продолжить движение. quick=True: J сразу, позицию по компасу уточняем уже на ходу."""
         with self._lock:
             if self._thread is None or self.moving or self.finished or self._stop.is_set():
                 return
@@ -634,7 +642,11 @@ class RouteRunner:
         # ждёт на sleep()) -- без блокировки, как и в navigate(), иначе на это
         # время встаёт advance()/_loop в фоновом потоке. Состояние перепроверяем
         # после: resume() могли отменить (stop()) пока мы ждали компас.
-        self._relocate_on_resume()
+        if quick:
+            if self._relocate and self._nav is not None and self._position_fn is not None:
+                self._need_reloc, self._reloc_reads, self._reloc_since = True, [], None
+        else:
+            self._relocate_on_resume()
         with self._lock:
             if self._thread is None or self.moving or self.finished or self._stop.is_set():
                 return
@@ -659,13 +671,19 @@ class RouteRunner:
                 self._log("Маршрут: поток навигации не завершился вовремя при остановке")
         with self._lock:
             if self.moving:
-                self._halt()
+                self._halt(force=True)
 
     def advance(self, dt: float) -> None:
         """Продвинуть время на dt секунд; при необходимости сменить шаг."""
         with self._lock:
             if not self.moving:
                 return
+            adv_t = getattr(self, "_adv_t", None)
+            if adv_t is not None:
+                # поток мог ждать замок, пока шла проверка J: время считаем с момента подтверждённого старта
+                now = self._clock()
+                dt = max(0.0, min(dt, now - adv_t))
+                self._adv_t = now
             self._elapsed += dt
             legs = self.route.legs
             if self._trim_left > 0:
@@ -677,7 +695,7 @@ class RouteRunner:
                 self._idx += 1
                 if self._idx >= len(legs):
                     if not self.route.loop:
-                        self._halt()
+                        self._halt(force=True)
                         self.finished = True
                         self._log("Маршрут пройден до конца, лодка остановлена")
                         return
@@ -687,12 +705,51 @@ class RouteRunner:
                 self._apply(legs[self._idx].action)
 
     # -- внутреннее ---------------------------------------------------------
+    def _set_trolling(self, want: bool) -> None:
+        """Привести режим тролинга в игре к want (J), сверяясь с подписью у J.
+
+        J, нажатая во время анимации (удилище, укладка), игрой проглатывается, поэтому после
+        нажатия проверяем подпись и при необходимости нажимаем снова. Если подпись не читается,
+        работаем по старому счёту нажатий.
+        """
+        fn = self._state_fn
+        if fn is None:
+            if self.game_on != want:
+                self._io.press(TROLLING_KEY)
+            self.game_on = want
+            return
+        for attempt in range(4):
+            try:
+                cur = fn()
+            except Exception:  # noqa: BLE001
+                cur = None
+            self._log(f"Маршрут: J: подпись {self._state_note(cur)}, нужно {'едет' if want else 'стоит'}, проверка {attempt + 1}")
+            if cur is None:
+                # подпись не читается: как раньше, по счёту нажатий
+                if attempt == 0 and self.game_on != want:
+                    self._io.press(TROLLING_KEY)
+                break
+            if cur == want:
+                break
+            if attempt:
+                self._log("Маршрут: J не сработала (игра её проглотила), нажимаю ещё раз")
+            self._io.press(TROLLING_KEY)
+            time.sleep(1.0)
+        self.game_on = want
+
+    def _state_note(self, cur) -> str:
+        word = {True: "едет", False: "стоит", None: "не прочиталась"}[cur]
+        owner = getattr(self._state_fn, "__self__", None)
+        scores = getattr(owner, "last_troll_scores", None)
+        return f"{word} {scores}" if scores else word
+
     def _begin_moving(self) -> None:
-        self._io.press(TROLLING_KEY)
+        self._set_trolling(True)
         self.moving = True
+        self._adv_t = self._clock()  # часы маршрута идут только с этого момента (после проверки J)
         self._apply(self.route.legs[self._idx].action)
 
-    def _halt(self) -> None:
+    def _halt(self, force: bool = False) -> None:
         # Каждый шаг отдельно и со своим try/except: если key_up(LEFT_KEY)
         # упадёт, key_up(RIGHT_KEY) и press(TROLLING_KEY) всё равно должны
         # выполниться -- иначе клавиша руления может остаться зажатой
@@ -703,13 +760,21 @@ class RouteRunner:
         for step in (
             lambda: self._io.key_up(LEFT_KEY),
             lambda: self._io.key_up(RIGHT_KEY),
-            lambda: self._io.press(TROLLING_KEY),
+            lambda: self._press_stop_j(force),
         ):
             try:
                 step()
             except Exception:  # noqa: BLE001
                 self._log("Маршрут: ошибка при остановке лодки, освобождаю остальные клавиши")
         self.moving = False
+
+    def _press_stop_j(self, force: bool) -> None:
+        # J останавливает лодку и с удилищем в руках (проверено в игре при поклёвке)
+        if self._state_fn is None:
+            self._io.press(TROLLING_KEY)
+            self.game_on = False
+        else:
+            self._set_trolling(False)
 
     def _apply(self, action: str) -> None:
         self._trim_left = 0.0
@@ -846,6 +911,7 @@ class RouteRunner:
                     return
                 if now > self._jtest_until:
                     self._io.press(TROLLING_KEY)  # вернуть как было
+                    self.game_on = not self.game_on
                     self._jtest = 0
                     self._jtest_block = now + 40.0
                     self._log("Маршрут: после J лодка не поехала, возвращаю J: значит она во что-то упёрлась")
@@ -856,6 +922,7 @@ class RouteRunner:
                 self._jtest_pos = pos
                 self._jtest_until = now + 9.0
                 self._io.press(TROLLING_KEY)
+                self.game_on = not self.game_on
                 self._log("Маршрут: лодка стоит при включённом маршруте - нажимаю J (возможно, режим тролинга не включился)")
                 return
             if res.stuck and not self.stuck:
@@ -1096,6 +1163,6 @@ class RouteRunner:
             try:
                 with self._lock:
                     if self.moving:
-                        self._halt()
+                        self._halt(force=True)
             except Exception:  # noqa: BLE001
                 pass
