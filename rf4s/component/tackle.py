@@ -79,7 +79,7 @@ class PullOptions:
     snag_red_from: float = BAR_RED_FRACTION  # с какой доли шкалы заливка считается красной (0.78)
     snag_delay: float = 3.0  # сколько секунд подряд, с
     snag_samples: int = 3  # минимум замеров подряд
-    log_state: bool = True  # писать в лог смену состояния шкалы в pull()
+    log_state: bool = True  # писать в лог смену состояния шкалы в pull() (только с флагом -d)
     lift_duration: float = 3.0  # длительность удержания ПКМ при раскачивании, с
     lift_release_delay: float = 3.0  # пауза между раскачиваниями, с
     # Смотка закончилась (рыба у кончика удилища): сколько секунд поднимать удилище до
@@ -401,7 +401,7 @@ class Tackle:
                     self.lift()
                     return
             else:
-                if opt.log_state and (state.hooked, state.zone) != last_state:
+                if opt.log_state and self.cfg.ARGS.DATA and (state.hooked, state.zone) != last_state:
                     last_state = (state.hooked, state.zone)
                     logger.info(
                         "Pull state: fish=%s zone=%d fill=%dpx (%.0f%%)",
