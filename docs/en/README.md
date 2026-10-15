@@ -9,6 +9,7 @@
 
 ![GitHub License](https://img.shields.io/badge/license-GPL--3.0-blue)
 [![Python: 3.11 | 3.12](https://img.shields.io/badge/python-3.11_%7C_3.12-blue)](https://www.python.org/downloads/)
+[![GitHub Stars](https://img.shields.io/github/stars/NerealNeSkill/rf4-bot?style=flat&logo=github)](https://github.com/NerealNeSkill/rf4-bot/stargazers)
 
 </div>
 
