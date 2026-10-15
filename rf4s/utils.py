@@ -654,14 +654,6 @@ JITTER_SCALE = 0.07
 random.seed(datetime.datetime.now().timestamp())
 
 
-def _debug_flag_in_argv() -> bool:
-    """Есть ли среди параметров запуска флаг -d (--data): тогда в консоли пишется время."""
-    return any(
-        a == "--data" or (a.startswith("-") and not a.startswith("--") and "d" in a[1:])
-        for a in sys.argv[1:]
-    )
-
-
 def setup_logging() -> logging.Logger:
     os.makedirs("logs", exist_ok=True)
 
@@ -673,10 +665,6 @@ def setup_logging() -> logging.Logger:
                 "format": "%(message)s",
                 "datefmt": "%Y-%m-%dT%H:%M:%S%z",
             },
-            "compact": {
-                "()": "rf4s.controller.log_ru.CompactFormatter",
-                "with_time": _debug_flag_in_argv(),
-            },
             "iso-8601-detailed": {
                 "format": "%(asctime)s [%(levelname)s] %(message)s",
                 "datefmt": "%Y-%m-%dT%H:%M:%S%z",
@@ -685,9 +673,9 @@ def setup_logging() -> logging.Logger:
         "handlers": {
             "stdout": {
                 "level": "INFO",
-                "formatter": "compact",
-                "class": "logging.StreamHandler",
-                "stream": "ext://sys.stdout",
+                "formatter": "iso-8601-simple",
+                "()": "rich.logging.RichHandler",
+                "rich_tracebacks": True,
             },
             "file": {
                 "class": "logging.handlers.RotatingFileHandler",
