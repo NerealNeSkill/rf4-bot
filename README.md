@@ -1,11 +1,11 @@
 <div align="center">
 
-![RF4Bot][logo]
-<h1 align="center">RF4Bot: Russian Fishing 4 bot</h1>
+<img src="/static/readme/logo.png" alt="RF4Bot" width="128">
+<h1 align="center">RF4Bot: бот для Русской рыбалки 4</h1>
 
-**English** | [Русский][readme_ru]
+[English][readme_en] | **Русский**
 
-**A Russian Fishing 4 fishing bot: spin, bottom, marine and float fishing, plus trolling along recorded routes.**
+**Бот для Русской рыбалки 4: спиннинг, донка, море, поплавок и троллинг по записанным маршрутам.**
 
 ![GitHub License](https://img.shields.io/badge/license-GPL--3.0-blue)
 [![Python: 3.11 | 3.12](https://img.shields.io/badge/python-3.11_%7C_3.12-blue)](https://www.python.org/downloads/)
@@ -13,25 +13,25 @@
 </div>
 
 > [!NOTE]
-> RF4Bot is a fork of **[RussianFishing4Script (RF4S)](https://github.com/dereklee0310/RussianFishing4Script)** by **Derek Lee**, based on v0.11.0.
-> The original author allowed commercial use under GPL-3.0 as long as the source code stays open. All credit for the foundation goes to him.
+> RF4Bot — форк **[RussianFishing4Script (RF4S)](https://github.com/dereklee0310/RussianFishing4Script)** авторства **Derek Lee** на базе v0.11.0.
+> Автор разрешил коммерческое использование по GPL-3.0 при условии, что исходный код остаётся открытым. Основа проекта — его заслуга.
 
-## Open source and the launcher
+## Открытый код и лаунчер
 
-The whole bot is open and licensed under **GNU GPL v3**. You can run it for free from source with `python main.py`, as in the original project.
+Весь бот открыт и распространяется по лицензии **GNU GPL v3**. Его можно бесплатно запускать из исходников: `python main.py`, как в оригинале.
 
-A convenient installer with a graphical launcher, license check, automatic updates and support is available separately at **https://rf4-bot.ru/**. The launcher is a separate program that starts the bot and does not change its code. Every build comes with a link to the matching source code.
+Удобный установщик с графическим лаунчером, проверкой лицензии, автообновлением и поддержкой доступен отдельно на **https://rf4-bot.ru/**. Лаунчер — отдельная программа: она запускает бота и не меняет его код. К каждой сборке прилагается ссылка на соответствующий исходный код.
 
-## What is different from the original
+## Чем отличается от оригинала
 
-- Trolling along **recorded routes** (compass heading, coordinates, left/right turn timing, ready-made presets in `static/trolling`).
-- Route recording with a readable console log (RU/EN).
-- Additional rod placement settings and various stability fixes (see **[CHANGELOG][changelog]**).
+- Троллинг по **записанным маршрутам** (курс по компасу, координаты, время поворотов влево/вправо, готовые пресеты в `static/trolling`).
+- Запись маршрута с понятным выводом в консоль (RU/EN).
+- Дополнительные настройки расстановки удилищ и исправления стабильности (см. **[ИЗМЕНЕНИЯ][changelog]**).
 
-## Installation (from source)
+## Установка (из исходников)
 > [!WARNING]
-> 1. The path to the folder cannot contain non-English characters.
-> 2. Python 3.13+ is not supported, required version: >=3.11,<=3.12.
+> 1. В пути к папке не должно быть русских букв.
+> 2. Python 3.13+ не поддерживается, нужен >=3.11,<=3.12.
 
 ```
 git clone https://github.com/NerealNeSkill/rf4-bot.git
@@ -40,37 +40,36 @@ pip install -r requirements.txt
 python main.py
 ```
 
-With uv:
+Через uv:
 ```
 uv sync
 uv run main.py
 ```
-See **[INSTALLATION][installation]** and **[CONFIGURATION][configuration]** for details.
+Подробнее: **[УСТАНОВКА][installation]** и **[НАСТРОЙКА][configuration]**.
 
-## Game settings
-- Set both system and in-game interface scales to "1x"; use "window mode" or "borderless windowed".
-- Make sure the reel is fully spooled (the bot watches the spool to detect retrieval). With rainbow line use the `-R` flag.
-- If Windows Mouse ClickLock is enabled, set the time to long.
-- Bottom fishing: put your rods in quick selection slots (1~3). Other modes: take the rod in hand.
-- If the bot runs but nothing happens, run it as administrator.
+## Настройки игры
+- Масштаб интерфейса в системе и в игре — «1x»; режим «оконный» или «окно без рамки».
+- Катушка должна быть полностью намотана (бот следит за шпулей). С радужной леской используйте флаг `-R`.
+- Если включена «залипание мыши» (ClickLock) в Windows, поставьте длинное время.
+- Донка: уберите удочки в слоты быстрого выбора (1~3). Остальные режимы: возьмите удочку в руки.
+- Бот работает, но ничего не происходит — запустите от имени администратора.
 
-## Documentation
+## Документация
 | | EN | RU |
 | - | - | - |
-| Installation | [INSTALLATION][installation] | [УСТАНОВКА][installation_ru] |
-| Configuration | [CONFIGURATION][configuration] | [НАСТРОЙКА][configuration_ru] |
-| Changelog | [CHANGELOG][changelog] | [ИЗМЕНЕНИЯ][changelog_ru] |
+| Установка | [INSTALLATION][installation_en] | [УСТАНОВКА][installation] |
+| Настройка | [CONFIGURATION][configuration_en] | [НАСТРОЙКА][configuration] |
+| Изменения | [CHANGELOG][changelog_en] | [ИЗМЕНЕНИЯ][changelog] |
 
-## License and credits
-**[GNU General Public License v3][license]**. See also [NOTICE](/NOTICE).
-Based on RussianFishing4Script, Copyright (C) Derek Lee.
+## Лицензия и авторство
+**[GNU General Public License v3][license]**. См. также [NOTICE](/NOTICE).
+Основано на RussianFishing4Script, Copyright (C) Derek Lee.
 
-[logo]: /static/readme/RF4S.png
-[readme_ru]: /docs/ru/README.md
-[installation]: /docs/en/INSTALLATION.md
-[configuration]: /docs/en/CONFIGURATION.md
-[changelog]: /docs/en/CHANGELOG.md
-[installation_ru]: /docs/ru/INSTALLATION.md
-[configuration_ru]: /docs/ru/CONFIGURATION.md
-[changelog_ru]: /docs/ru/CHANGELOG.md
+[readme_en]: /docs/en/README.md
+[installation]: /docs/ru/INSTALLATION.md
+[configuration]: /docs/ru/CONFIGURATION.md
+[changelog]: /docs/ru/CHANGELOG.md
+[installation_en]: /docs/en/INSTALLATION.md
+[configuration_en]: /docs/en/CONFIGURATION.md
+[changelog_en]: /docs/en/CHANGELOG.md
 [license]: /LICENSE
